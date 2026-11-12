@@ -1,0 +1,7 @@
+/* Aussehen der ausgelieferten Seite. Platzhalter, bis das Regelwerk mit Tokens kommt. */
+.oeffentlich { margin: 0; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; color: #17181a; }
+.oeffentlich main { max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }
+.seite { font-size: 18px; line-height: 1.6; }
+.seite img { display: block; width: 100%; height: auto; margin-bottom: 24px; }
+.seite h1 { margin: 0 0 16px; font-size: clamp(28px, 6vw, 48px); line-height: 1.1; overflow-wrap: anywhere; }
+.seite p { margin: 0 0 16px; }

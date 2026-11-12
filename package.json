@@ -1,0 +1,14 @@
+{
+  "name": "agenturtool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CMS und Arbeitsraum für Agenturen. Etappe 1: Kern, Material, Prüf-Link, erste ausgelieferte Seite.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test \"tests/**/*.test.ts\""
+  }
+}
