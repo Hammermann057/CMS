@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "CMS und Arbeitsraum für Agenturen. Etappe 1: Kern, Material, Prüf-Link, erste ausgelieferte Seite.",
+  "description": "CMS und Arbeitsraum für Agenturen: Material, Seiten, Freigabe per Prüf-Link, Anmeldung per Mail-Link.",
   "engines": {
     "node": ">=22.18"
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/server.ts",
+    "einrichten": "node --disable-warning=ExperimentalWarning src/einrichten.ts",
     "test": "node --disable-warning=ExperimentalWarning --test \"tests/**/*.test.ts\""
   }
 }

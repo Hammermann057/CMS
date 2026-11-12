@@ -33,7 +33,12 @@ a { color: var(--signal); }
   border-bottom: 1px solid var(--linie);
 }
 .marke { font-weight: 700; color: var(--text); text-decoration: none; }
-.wechsel { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; }
+.navigation { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: 14px; }
+.navigation a { font-weight: 600; }
+.navigation .wer { color: var(--leise); }
+.navigation button { min-height: 36px; }
+.schmal { max-width: 480px; margin: 40px auto 0; }
+.schmal .felder { margin-top: 16px; }
 
 main { max-width: 960px; margin: 0 auto; padding: 24px; }
 h1 { margin: 0 0 4px; font-size: 28px; line-height: 1.2; }
@@ -58,7 +63,8 @@ input, select, textarea {
   border: 1px solid #6f7279;
   border-radius: 6px;
 }
-.wechsel select { width: auto; }
+.felder .haken { display: flex; align-items: center; gap: 8px; font-weight: 400; }
+.felder .haken input { width: 20px; min-height: 20px; }
 button {
   min-height: 44px;
   padding: 0 16px;
@@ -69,7 +75,7 @@ button {
   font-weight: 600;
   cursor: pointer;
 }
-button.zweit, .wechsel button { background: var(--flaeche); color: var(--text); border: 1px solid #6f7279; }
+button.zweit { background: var(--flaeche); color: var(--text); border: 1px solid #6f7279; }
 button.leise { min-height: 32px; padding: 0 10px; background: none; color: var(--signal); font-weight: 400; text-decoration: underline; }
 
 .felder { display: grid; gap: 6px; max-width: 640px; }
@@ -78,7 +84,12 @@ button.leise { min-height: 32px; padding: 0 10px; background: none; color: var(-
 .knoepfe { display: flex; flex-wrap: wrap; gap: 8px; }
 .knoepfe button { margin-top: 12px; }
 
-.projekte, .medien, .verlauf, .hinweise { margin: 0; padding: 0; list-style: none; }
+.projekte, .medien, .verlauf, .hinweise, .team { margin: 0; padding: 0; list-style: none; }
+.team li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 0; border-top: 1px solid var(--linie); }
+.team li:first-child { border-top: 0; }
+.team div { min-width: 0; overflow-wrap: anywhere; }
+.team small { display: block; color: var(--leise); }
+.team .inaktiv strong { color: var(--leise); text-decoration: line-through; }
 .projekte li {
   display: flex;
   flex-wrap: wrap;

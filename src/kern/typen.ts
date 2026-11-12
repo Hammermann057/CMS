@@ -15,6 +15,10 @@ export interface Person {
   rolle: Rolle;
   /** Nur bei Kund:innen gesetzt: das eine Projekt, das sie sehen dürfen. */
   projektId: string | null;
+  /** Hierhin geht der Anmelde-Link. Personen aus Etappe 1 haben noch keine. */
+  email: string | null;
+  /** Ohne Zugang bleibt die Person im Verlauf, kann sich aber nicht mehr anmelden. */
+  aktiv: boolean;
 }
 
 export interface Projekt {

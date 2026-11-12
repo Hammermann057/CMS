@@ -35,7 +35,8 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS agentur (id TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS person (
   id TEXT PRIMARY KEY, agentur_id TEXT NOT NULL REFERENCES agentur(id),
-  name TEXT NOT NULL, rolle TEXT NOT NULL, projekt_id TEXT
+  name TEXT NOT NULL, rolle TEXT NOT NULL, projekt_id TEXT,
+  email TEXT, aktiv INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS projekt (
   id TEXT PRIMARY KEY, agentur_id TEXT NOT NULL REFERENCES agentur(id),
@@ -63,6 +64,15 @@ CREATE TABLE IF NOT EXISTS ereignis (
   person_name TEXT NOT NULL, art TEXT NOT NULL, text TEXT NOT NULL, zeit TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ereignis_projekt ON ereignis (projekt_id, zeit);
+CREATE TABLE IF NOT EXISTS anmeldung (
+  token_hash TEXT PRIMARY KEY, person_id TEXT NOT NULL REFERENCES person(id),
+  angefordert_am TEXT NOT NULL, gueltig_bis TEXT NOT NULL, eingeloest_am TEXT
+);
+CREATE INDEX IF NOT EXISTS anmeldung_person ON anmeldung (person_id, angefordert_am);
+CREATE TABLE IF NOT EXISTS sitzung (
+  id_hash TEXT PRIMARY KEY, person_id TEXT NOT NULL REFERENCES person(id),
+  angelegt_am TEXT NOT NULL, gueltig_bis TEXT NOT NULL
+);
 `;
 
 type Zeile = Record<string, unknown>;
@@ -103,7 +113,29 @@ function kurz(text: unknown, max: number): string {
   return String(text ?? '').replace(/\r\n/g, '\n').trim().slice(0, max);
 }
 
-const jetzt = (): string => new Date().toISOString();
+// --- Anmeldung ------------------------------------------------------------------
+
+/** So lange gilt ein Link aus der Anmelde-Mail. */
+export const LINK_GUELTIG_MINUTEN = 15;
+/** So lange bleibt man nach dem Klick angemeldet. */
+export const SITZUNG_GUELTIG_TAGE = 30;
+/** Mehr Anmelde-Mails pro Stunde und Adresse gehen nicht raus. */
+export const MAX_LINKS_PRO_STUNDE = 5;
+
+const ABGELAUFEN = 'Dieser Anmelde-Link ist abgelaufen oder wurde schon benutzt. Fordere einfach einen neuen an.';
+
+/** Tokens liegen nur als Prüfsumme in der Datenbank. Wer die Datei liest, kann sich damit nicht anmelden. */
+const pruefsummeVon = (wert: string): string => createHash('sha256').update(wert).digest('hex');
+const zufall = (): string => randomBytes(32).toString('base64url');
+
+/** Bereinigt eine Mail-Adresse oder gibt null zurück, wenn sie nicht wie eine aussieht. */
+export function emailAus(eingabe: unknown): string | null {
+  const email = String(eingabe ?? '').trim().toLowerCase();
+  if (email.length > 254) return null;
+  // Bewusst schlicht. Ob die Adresse lebt, zeigt erst die Mail.
+  if (!/^[^\s@<>()[\]\\,;:"]+@[^\s@<>()[\]\\,;:"]+\.[^\s@<>()[\]\\,;:".]{2,}$/.test(email)) return null;
+  return email;
+}
 
 function alsPerson(z: Zeile): Person {
   return {
@@ -112,6 +144,8 @@ function alsPerson(z: Zeile): Person {
     name: String(z.name),
     rolle: String(z.rolle) as Rolle,
     projektId: z.projekt_id === null ? null : String(z.projekt_id),
+    email: z.email === null || z.email === undefined ? null : String(z.email),
+    aktiv: Number(z.aktiv ?? 1) === 1,
   };
 }
 
@@ -161,14 +195,32 @@ function alsStand(z: Zeile): Stand {
 export class Kern {
   #db: DatabaseSync;
   #medienOrdner: string;
+  #uhr: () => Date;
 
-  /** `verzeichnis` nimmt Datenbank und hochgeladene Dateien auf. */
-  constructor(verzeichnis: string) {
+  /**
+   * `verzeichnis` nimmt Datenbank und hochgeladene Dateien auf.
+   * `uhr` lässt sich in Tests ersetzen, um Ablaufzeiten zu prüfen.
+   */
+  constructor(verzeichnis: string, optionen: { uhr?: () => Date } = {}) {
+    this.#uhr = optionen.uhr ?? (() => new Date());
     this.#medienOrdner = join(verzeichnis, 'medien');
     mkdirSync(this.#medienOrdner, { recursive: true });
     this.#db = new DatabaseSync(join(verzeichnis, 'kern.sqlite'));
     this.#db.exec('PRAGMA foreign_keys = ON');
     this.#db.exec(SCHEMA);
+    this.#ergaenzeAlteDatenbank();
+  }
+
+  /** Datenbanken aus Etappe 1 kennen noch keine Mail-Adressen. */
+  #ergaenzeAlteDatenbank(): void {
+    const spalten = new Set((this.#db.prepare('PRAGMA table_info(person)').all() as Zeile[]).map((z) => String(z.name)));
+    if (!spalten.has('email')) this.#db.exec('ALTER TABLE person ADD COLUMN email TEXT');
+    if (!spalten.has('aktiv')) this.#db.exec('ALTER TABLE person ADD COLUMN aktiv INTEGER NOT NULL DEFAULT 1');
+    this.#db.exec('CREATE UNIQUE INDEX IF NOT EXISTS person_email ON person (email) WHERE email IS NOT NULL');
+  }
+
+  #jetzt(abstandMs = 0): string {
+    return new Date(this.#uhr().getTime() + abstandMs).toISOString();
   }
 
   schliessen(): void {
@@ -184,40 +236,141 @@ export class Kern {
   }
 
   /** Erste Person einer Agentur. Danach legt nur die Leitung weitere an. */
-  erstePersonAnlegen(agenturId: string, name: string): Person {
+  erstePersonAnlegen(agenturId: string, daten: { name: string; email: string }): Person {
     const vorhanden = this.#db.prepare('SELECT COUNT(*) AS n FROM person WHERE agentur_id = ?').get(agenturId) as Zeile;
     if (Number(vorhanden.n) > 0) throw new Verboten('Diese Agentur hat schon Personen.');
-    return this.#personEinfuegen(agenturId, name, 'leitung', null);
+    return this.#personEinfuegen(agenturId, daten.name, daten.email, 'leitung', null);
   }
 
-  personAnlegen(als: Person, daten: { name: string; rolle: Rolle; projektId?: string | null }): Person {
-    if (!darf(als, 'person.anlegen')) throw new Verboten('Nur die Leitung legt Personen an.');
+  personAnlegen(als: Person, daten: { name: string; email: string; rolle: Rolle; projektId?: string | null }): Person {
+    if (!darf(als, 'team.verwalten')) throw new Verboten('Nur die Leitung gibt Zugänge.');
     let projektId: string | null = null;
     if (daten.rolle === 'kundin') {
       if (!daten.projektId) throw new Fehler('Kund:innen brauchen ein Projekt.');
       projektId = this.#projektMitRecht(als, daten.projektId, 'projekt.ansehen').id;
     }
-    return this.#personEinfuegen(als.agenturId, daten.name, daten.rolle, projektId);
+    return this.#personEinfuegen(als.agenturId, daten.name, daten.email, daten.rolle, projektId);
   }
 
-  #personEinfuegen(agenturId: string, name: string, rolle: Rolle, projektId: string | null): Person {
-    const person: Person = { id: randomUUID(), agenturId, name: kurz(name, 80) || 'Ohne Namen', rolle, projektId };
+  #personEinfuegen(agenturId: string, name: string, eingabeEmail: string, rolle: Rolle, projektId: string | null): Person {
+    const email = emailAus(eingabeEmail);
+    if (!email) throw new Fehler('Bitte eine gültige Mail-Adresse angeben.');
+    if (this.#db.prepare('SELECT 1 FROM person WHERE email = ?').get(email)) {
+      throw new Fehler('Diese Mail-Adresse hat schon einen Zugang.');
+    }
+    const person: Person = { id: randomUUID(), agenturId, name: kurz(name, 80) || 'Ohne Namen', rolle, projektId, email, aktiv: true };
     this.#db
-      .prepare('INSERT INTO person (id, agentur_id, name, rolle, projekt_id) VALUES (?, ?, ?, ?, ?)')
-      .run(person.id, agenturId, person.name, rolle, projektId);
+      .prepare('INSERT INTO person (id, agentur_id, name, rolle, projekt_id, email, aktiv) VALUES (?, ?, ?, ?, ?, ?, 1)')
+      .run(person.id, agenturId, person.name, rolle, projektId, email);
     return person;
   }
 
-  person(id: string): Person | null {
-    const z = this.#db.prepare('SELECT * FROM person WHERE id = ?').get(id) as Zeile | undefined;
-    return z ? alsPerson(z) : null;
-  }
-
-  personen(agenturId: string): Person[] {
-    const zeilen = this.#db.prepare('SELECT * FROM person WHERE agentur_id = ? ORDER BY rowid').all(agenturId) as Zeile[];
+  /** Alle Personen der eigenen Agentur. Kund:innen sehen das Team nicht. */
+  team(als: Person): Person[] {
+    if (!darf(als, 'team.ansehen')) throw new Verboten('Das Team sieht nur die Agentur selbst.');
+    const zeilen = this.#db
+      .prepare('SELECT * FROM person WHERE agentur_id = ? ORDER BY aktiv DESC, rowid')
+      .all(als.agenturId) as Zeile[];
     return zeilen.map(alsPerson);
   }
 
+  /** Sperrt den Zugang sofort: offene Links und Sitzungen verfallen. Der Verlauf bleibt. */
+  zugangEntziehen(als: Person, personId: string): Person {
+    if (!darf(als, 'team.verwalten')) throw new Verboten('Nur die Leitung verwaltet Zugänge.');
+    const z = this.#db.prepare('SELECT * FROM person WHERE id = ?').get(personId) as Zeile | undefined;
+    if (!z || String(z.agentur_id) !== als.agenturId) throw new NichtGefunden('Person nicht gefunden.');
+    if (String(z.id) === als.id) throw new Fehler('Den eigenen Zugang kannst du nicht entziehen.');
+    this.#db.prepare('UPDATE person SET aktiv = 0 WHERE id = ?').run(personId);
+    this.#db.prepare('DELETE FROM sitzung WHERE person_id = ?').run(personId);
+    this.#db.prepare('UPDATE anmeldung SET eingeloest_am = ? WHERE person_id = ? AND eingeloest_am IS NULL').run(this.#jetzt(), personId);
+    return { ...alsPerson(z), aktiv: false };
+  }
+
+  zugangWiedergeben(als: Person, personId: string): Person {
+    if (!darf(als, 'team.verwalten')) throw new Verboten('Nur die Leitung verwaltet Zugänge.');
+    const z = this.#db.prepare('SELECT * FROM person WHERE id = ?').get(personId) as Zeile | undefined;
+    if (!z || String(z.agentur_id) !== als.agenturId) throw new NichtGefunden('Person nicht gefunden.');
+    this.#db.prepare('UPDATE person SET aktiv = 1 WHERE id = ?').run(personId);
+    return { ...alsPerson(z), aktiv: true };
+  }
+
+  // --- Anmeldung per Mail-Link ----------------------------------------------
+
+  /**
+   * Legt einen Einmal-Link an und gibt das Token für die Mail zurück.
+   * `null` heißt: unbekannte Adresse, gesperrter Zugang oder zu viele Anfragen.
+   * Wer aufruft, zeigt in jedem Fall dieselbe Antwort, damit niemand ausprobieren kann,
+   * welche Adressen einen Zugang haben.
+   */
+  anmeldungAnfordern(eingabeEmail: string): { person: Person; token: string } | null {
+    const email = emailAus(eingabeEmail);
+    if (!email) return null;
+    const z = this.#db.prepare('SELECT * FROM person WHERE email = ? AND aktiv = 1').get(email) as Zeile | undefined;
+    if (!z) return null;
+    const person = alsPerson(z);
+    const zuletzt = this.#db
+      .prepare('SELECT COUNT(*) AS n FROM anmeldung WHERE person_id = ? AND angefordert_am > ?')
+      .get(person.id, this.#jetzt(-60 * 60 * 1000)) as Zeile;
+    if (Number(zuletzt.n) >= MAX_LINKS_PRO_STUNDE) return null;
+
+    const token = zufall();
+    this.#db
+      .prepare('INSERT INTO anmeldung (token_hash, person_id, angefordert_am, gueltig_bis) VALUES (?, ?, ?, ?)')
+      .run(pruefsummeVon(token), person.id, this.#jetzt(), this.#jetzt(LINK_GUELTIG_MINUTEN * 60 * 1000));
+    // Aufräumen: Was älter als einen Tag ist, zählt auch für die Grenze nicht mehr.
+    this.#db.prepare('DELETE FROM anmeldung WHERE angefordert_am < ?').run(this.#jetzt(-24 * 60 * 60 * 1000));
+    return { person, token };
+  }
+
+  /** Zeigt, für wen ein Link gilt, ohne ihn zu verbrauchen. */
+  anmeldungPruefen(token: string): Person {
+    const z = this.#db
+      .prepare(
+        `SELECT p.* FROM anmeldung a JOIN person p ON p.id = a.person_id
+         WHERE a.token_hash = ? AND a.eingeloest_am IS NULL AND a.gueltig_bis > ? AND p.aktiv = 1`,
+      )
+      .get(pruefsummeVon(token), this.#jetzt()) as Zeile | undefined;
+    if (!z) throw new Fehler(ABGELAUFEN);
+    return alsPerson(z);
+  }
+
+  /** Verbraucht den Link und legt eine Sitzung an. Jeder Link geht genau einmal. */
+  anmeldungEinloesen(token: string): { sitzung: string; person: Person; gueltigBis: string } {
+    const person = this.anmeldungPruefen(token);
+    const jetzt = this.#jetzt();
+    // Die Bedingung im UPDATE verhindert, dass zwei gleichzeitige Klicks beide durchkommen.
+    const ergebnis = this.#db
+      .prepare('UPDATE anmeldung SET eingeloest_am = ? WHERE token_hash = ? AND eingeloest_am IS NULL AND gueltig_bis > ?')
+      .run(jetzt, pruefsummeVon(token), jetzt);
+    if (Number(ergebnis.changes) !== 1) throw new Fehler(ABGELAUFEN);
+    // Ältere, noch offene Links derselben Person werden mit verbraucht.
+    this.#db.prepare('UPDATE anmeldung SET eingeloest_am = ? WHERE person_id = ? AND eingeloest_am IS NULL').run(jetzt, person.id);
+
+    const sitzung = zufall();
+    const gueltigBis = this.#jetzt(SITZUNG_GUELTIG_TAGE * 24 * 60 * 60 * 1000);
+    this.#db
+      .prepare('INSERT INTO sitzung (id_hash, person_id, angelegt_am, gueltig_bis) VALUES (?, ?, ?, ?)')
+      .run(pruefsummeVon(sitzung), person.id, jetzt, gueltigBis);
+    this.#db.prepare('DELETE FROM sitzung WHERE gueltig_bis < ?').run(jetzt);
+    return { sitzung, person, gueltigBis };
+  }
+
+  /** Die angemeldete Person zu einer Sitzung, oder null. */
+  sitzungPerson(sitzung: string): Person | null {
+    const z = this.#db
+      .prepare(
+        `SELECT p.* FROM sitzung s JOIN person p ON p.id = s.person_id
+         WHERE s.id_hash = ? AND s.gueltig_bis > ? AND p.aktiv = 1`,
+      )
+      .get(pruefsummeVon(sitzung), this.#jetzt()) as Zeile | undefined;
+    return z ? alsPerson(z) : null;
+  }
+
+  abmelden(sitzung: string): void {
+    this.#db.prepare('DELETE FROM sitzung WHERE id_hash = ?').run(pruefsummeVon(sitzung));
+  }
+
+  /** Nur für die Einrichtung über die Kommandozeile. */
   agenturen(): Agentur[] {
     const zeilen = this.#db.prepare('SELECT * FROM agentur ORDER BY rowid').all() as Zeile[];
     return zeilen.map((z) => ({ id: String(z.id), name: String(z.name) }));
@@ -235,7 +388,7 @@ export class Kern {
       name,
       kunde: kurz(daten.kunde, 120),
       slug: this.#freierSlug(slugAus(name)),
-      angelegtAm: jetzt(),
+      angelegtAm: this.#jetzt(),
     };
     this.#db
       .prepare('INSERT INTO projekt (id, agentur_id, name, kunde, slug, angelegt_am) VALUES (?, ?, ?, ?, ?, ?)')
@@ -311,7 +464,7 @@ export class Kern {
     const version = vorhanden ? Number(vorhanden.version) + 1 : 1;
     const ablage = `${id}-v${version}.${ENDUNG[typ]}`;
     writeFileSync(join(this.#medienOrdner, ablage), datei.daten);
-    const zeit = jetzt();
+    const zeit = this.#jetzt();
 
     if (vorhanden) {
       this.#db
@@ -406,7 +559,7 @@ export class Kern {
         `INSERT INTO seite (projekt_id, agentur_id, entwurf, veroeffentlicht, geaendert_am) VALUES (?, ?, ?, NULL, ?)
          ON CONFLICT (projekt_id) DO UPDATE SET entwurf = excluded.entwurf, geaendert_am = excluded.geaendert_am`,
       )
-      .run(projekt.id, projekt.agenturId, JSON.stringify(inhalt), jetzt());
+      .run(projekt.id, projekt.agenturId, JSON.stringify(inhalt), this.#jetzt());
     this.#merke(projekt, als.name, 'seite.gespeichert', 'Entwurf der Seite gespeichert');
     return inhalt;
   }
@@ -426,7 +579,7 @@ export class Kern {
         `INSERT INTO stand (id, agentur_id, projekt_id, inhalt, zustand, token, eingereicht_von, eingereicht_am)
          VALUES (?, ?, ?, ?, 'eingereicht', ?, ?, ?)`,
       )
-      .run(id, projekt.agenturId, projekt.id, JSON.stringify(entwurf), randomBytes(24).toString('base64url'), als.name, jetzt());
+      .run(id, projekt.agenturId, projekt.id, JSON.stringify(entwurf), randomBytes(24).toString('base64url'), als.name, this.#jetzt());
     this.#merke(projekt, als.name, 'stand.eingereicht', 'Stand zur Freigabe eingereicht');
     return alsStand(this.#db.prepare('SELECT * FROM stand WHERE id = ?').get(id) as Zeile);
   }
@@ -454,7 +607,7 @@ export class Kern {
     const name = kurz(daten.name, 80);
     if (!name) throw new Fehler('Bitte den eigenen Namen angeben.');
     const kommentar = kurz(daten.kommentar, 2000) || null;
-    const zeit = jetzt();
+    const zeit = this.#jetzt();
     this.#db.exec('BEGIN');
     try {
       this.#db
@@ -517,6 +670,6 @@ export class Kern {
   #merke(projekt: Projekt, personName: string, art: string, text: string): void {
     this.#db
       .prepare('INSERT INTO ereignis (id, agentur_id, projekt_id, person_name, art, text, zeit) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(randomUUID(), projekt.agenturId, projekt.id, personName, art, text, jetzt());
+      .run(randomUUID(), projekt.agenturId, projekt.id, personName, art, text, this.#jetzt());
   }
 }

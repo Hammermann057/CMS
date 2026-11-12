@@ -1,0 +1,24 @@
+# Vorlage für systemd. Noch nicht auf einem echten Server ausprobiert.
+# Ablage: /etc/systemd/system/agenturtool.service
+# Geheimnisse (SMTP_PASSWORT) stehen in /etc/agenturtool.env, nur für root lesbar.
+
+[Unit]
+Description=Agenturtool
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=agenturtool
+WorkingDirectory=/opt/agenturtool
+EnvironmentFile=/etc/agenturtool.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning src/server.ts
+Restart=on-failure
+# Der Dienst darf nur in seinen Datenordner schreiben.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/agenturtool
+
+[Install]
+WantedBy=multi-user.target

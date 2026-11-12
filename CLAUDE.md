@@ -9,4 +9,8 @@
 - Alles, was Menschen eingeben, läuft im HTML durch `esc()`.
 - Vor jedem Commit: `npm test`. Änderungen an der Oberfläche zusätzlich im Browser durchklicken.
   Der Fehler mit `Referrer-Policy: no-referrer` (Browser schickt dann `Origin: null`) fiel nur dort auf.
-- Es gibt noch keine Anmeldung. Der Server darf nur auf 127.0.0.1 lauschen, bis es eine gibt.
+- Anmeldung per Mail-Link. Tokens und Sitzungen nur als Prüfsumme speichern, nie im Klartext und nie im Protokoll,
+  außer bei der Protokollpost für die Entwicklung auf `localhost`.
+- Der Server lauscht standardmäßig nur auf 127.0.0.1. Ins Netz geht er über einen Proxy mit HTTPS.
+  Links in Mails und Prüf-Links entstehen aus `BASIS_URL`, nie aus dem `Host`-Header der Anfrage.
+- Daten bleiben in der EU: keine Dienste einbauen, die Inhalte oder Adressen außerhalb verarbeiten.

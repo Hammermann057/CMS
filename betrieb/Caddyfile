@@ -1,0 +1,9 @@
+# Vorlage für Caddy als Proxy davor. Noch nicht auf einem echten Server ausprobiert.
+# Caddy holt das HTTPS-Zertifikat selbst, sobald der Name im DNS auf den Server zeigt.
+tool.deine-agentur.de {
+	reverse_proxy 127.0.0.1:3000
+	request_body {
+		max_size 26MB
+	}
+	header Strict-Transport-Security "max-age=31536000"
+}

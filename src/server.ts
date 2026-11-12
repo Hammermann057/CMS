@@ -3,11 +3,19 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { Fehler, Kern, MAX_GROESSE, NichtGefunden } from './kern/kern.ts';
+import { Fehler, Kern, LINK_GUELTIG_MINUTEN, MAX_GROESSE, NichtGefunden, SITZUNG_GUELTIG_TAGE } from './kern/kern.ts';
 import { darf, Verboten } from './kern/rechte.ts';
 import { hinweise } from './kern/pruefer.ts';
 import { esc, renderAusschnitt, renderSeite } from './renderer/seite.ts';
-import type { Ereignis, Hinweis, Medium, Person, ProjektUebersicht, Stand } from './kern/typen.ts';
+import { Protokollpost, smtpAusUmgebung } from './post.ts';
+import type { Post } from './post.ts';
+import type { Ereignis, Hinweis, Medium, Person, Projekt, ProjektUebersicht, Rolle, Stand } from './kern/typen.ts';
+
+export interface Einstellungen {
+  /** Adresse, unter der das Werkzeug erreichbar ist, etwa `https://tool.agentur.de`. Links in Mails bauen darauf auf. */
+  basisUrl: string;
+  post: Post;
+}
 
 const WEB = join(dirname(fileURLToPath(import.meta.url)), 'web');
 const STATISCH: Record<string, { typ: string; inhalt: Buffer }> = {
@@ -54,9 +62,10 @@ async function formular(req: IncomingMessage): Promise<URLSearchParams> {
 }
 
 /** Schreibende Anfragen müssen von dieser Seite selbst kommen. */
-function pruefeHerkunft(req: IncomingMessage): void {
+function pruefeHerkunft(req: IncomingMessage, basisUrl: string): void {
+  if (req.headers['sec-fetch-site'] === 'cross-site') throw new Verboten('Anfrage von fremder Seite abgelehnt.');
   const herkunft = req.headers.origin;
-  if (!herkunft) return;
+  if (!herkunft || herkunft === new URL(basisUrl).origin) return;
   let host = '';
   try {
     host = new URL(herkunft).host;
@@ -66,14 +75,21 @@ function pruefeHerkunft(req: IncomingMessage): void {
   if (host !== req.headers.host) throw new Verboten('Anfrage von fremder Seite abgelehnt.');
 }
 
-function personAusCookie(kern: Kern, req: IncomingMessage): Person {
-  const treffer = /(?:^|;\s*)person=([0-9a-f-]{36})/.exec(req.headers.cookie ?? '');
-  const gewaehlt = treffer ? kern.person(treffer[1]) : null;
-  if (gewaehlt) return gewaehlt;
-  const agentur = kern.agenturen()[0];
-  const erste = agentur ? kern.personen(agentur.id)[0] : undefined;
-  if (!erste) throw new Fehler('Es ist noch keine Agentur eingerichtet.');
-  return erste;
+// --- Sitzung -------------------------------------------------------------------
+
+/** Unter HTTPS mit dem Präfix `__Host-`: Dann nimmt der Browser das Cookie nur von genau dieser Adresse an. */
+const cookieName = (sicher: boolean): string => (sicher ? '__Host-sitzung' : 'sitzung');
+
+function sitzungAusCookie(req: IncomingMessage, sicher: boolean): string | null {
+  for (const teil of (req.headers.cookie ?? '').split(';')) {
+    const [name, ...wert] = teil.trim().split('=');
+    if (name === cookieName(sicher) && /^[A-Za-z0-9_-]{43}$/.test(wert.join('='))) return wert.join('=');
+  }
+  return null;
+}
+
+function sitzungsCookie(wert: string, sicher: boolean, sekunden: number): string {
+  return `${cookieName(sicher)}=${wert}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${sekunden}${sicher ? '; Secure' : ''}`;
 }
 
 // --- Antworten ----------------------------------------------------------------
@@ -108,15 +124,13 @@ function sendeMedium(res: ServerResponse, datei: { medium: Medium; daten: Buffer
 
 // --- Seiten -------------------------------------------------------------------
 
-function rahmen(titel: string, inhalt: string, wer?: { person: Person; alle: Person[] }): string {
-  const wechsel = wer
-    ? `<form method="post" action="/wechseln" class="wechsel">
-<label for="person">Angemeldet als</label>
-<select id="person" name="person">${wer.alle
-        .map((p) => `<option value="${esc(p.id)}"${p.id === wer.person.id ? ' selected' : ''}>${esc(p.name)}, ${ROLLEN_NAME[p.rolle]}</option>`)
-        .join('')}</select>
-<button type="submit">Wechseln</button>
-</form>`
+function rahmen(titel: string, inhalt: string, person?: Person): string {
+  const navigation = person
+    ? `<nav class="navigation" aria-label="Hauptnavigation">
+<a href="/">Projekte</a>${darf(person, 'team.ansehen') ? '<a href="/team">Team</a>' : ''}
+<span class="wer">${esc(person.name)}, ${ROLLEN_NAME[person.rolle]}</span>
+<form method="post" action="/abmelden"><button type="submit" class="zweit">Abmelden</button></form>
+</nav>`
     : '';
   return `<!doctype html>
 <html lang="de">
@@ -129,7 +143,7 @@ function rahmen(titel: string, inhalt: string, wer?: { person: Person; alle: Per
 <script src="/app.js" defer></script>
 </head>
 <body>
-<header class="kopf"><a href="/" class="marke">Agenturtool</a>${wechsel}</header>
+<header class="kopf"><a href="/" class="marke">Agenturtool</a>${navigation}</header>
 <main>${inhalt}</main>
 </body>
 </html>`;
@@ -198,12 +212,12 @@ function teilHinweise(liste: Hinweis[]): string {
     .join('')}</ul>`;
 }
 
-function teilFreigabe(stand: Stand | null, projektId: string, slug: string, host: string, darfEinreichen: boolean): string {
+function teilFreigabe(stand: Stand | null, projektId: string, slug: string, basisUrl: string, darfEinreichen: boolean): string {
   let zustand = '<p class="leer">Noch kein Stand eingereicht.</p>';
   if (stand?.zustand === 'eingereicht') {
     zustand = `<p>Eingereicht von ${esc(stand.eingereichtVon)} am ${zeit(stand.eingereichtAm)}. Wartet auf Freigabe.</p>
 <label for="link">Prüf-Link zum Weitergeben</label>
-<input id="link" readonly value="http://${esc(host)}/pruefen/${esc(stand.token)}">`;
+<input id="link" readonly value="${esc(basisUrl)}/pruefen/${esc(stand.token)}">`;
   } else if (stand?.zustand === 'freigegeben') {
     zustand = `<p>Freigegeben von ${esc(stand.entschiedenVon)} am ${zeit(stand.entschiedenAm ?? stand.eingereichtAm)}.
 <a href="/seiten/${esc(slug)}">Veröffentlichte Seite ansehen</a></p>`;
@@ -223,7 +237,7 @@ function teilVerlauf(ereignisse: Ereignis[]): string {
     .join('')}</ol></section>`;
 }
 
-function seiteProjekt(kern: Kern, person: Person, projektId: string, host: string): string {
+function seiteProjekt(kern: Kern, person: Person, projektId: string, basisUrl: string): string {
   const projekt = kern.projekt(person, projektId);
   const medien = kern.medien(person, projektId);
   const { entwurf } = kern.seite(person, projektId);
@@ -248,7 +262,7 @@ function seiteProjekt(kern: Kern, person: Person, projektId: string, host: strin
 ${projekt.kunde ? `<p class="unterzeile">${esc(projekt.kunde)}</p>` : ''}
 ${teilMedien(person, projekt.id, medien)}
 <section><h2>Seite</h2>${formularSeite}${teilHinweise(hinweise(entwurf))}${vorschau}</section>
-${teilFreigabe(kern.letzterStand(person, projekt.id), projekt.id, projekt.slug, host, darf(person, 'stand.einreichen', projekt))}
+${teilFreigabe(kern.letzterStand(person, projekt.id), projekt.id, projekt.slug, basisUrl, darf(person, 'stand.einreichen', projekt))}
 ${teilVerlauf(kern.verlauf(person, projekt.id))}`;
 }
 
@@ -286,28 +300,104 @@ ${teilHinweise(hinweise(stand.inhalt))}
 <section><h2>Entscheidung</h2>${entscheidung}</section>`;
 }
 
+function seiteAnmelden(): string {
+  return `<div class="schmal">
+<h1>Anmelden</h1>
+<p>Gib deine Mail-Adresse ein. Du bekommst einen Link, mit dem du dich ohne Passwort anmeldest.</p>
+<form method="post" action="/anmelden" class="felder">
+<label for="email">Mail-Adresse</label>
+<input id="email" name="email" type="email" required maxlength="254" autocomplete="email" autofocus>
+<button type="submit">Link schicken</button>
+</form>
+</div>`;
+}
+
+function seiteLinkUnterwegs(): string {
+  return `<div class="schmal">
+<h1>Schau in dein Postfach</h1>
+<p>Wenn die Adresse einen Zugang hat, ist ein Link unterwegs. Er gilt ${LINK_GUELTIG_MINUTEN} Minuten und funktioniert einmal.</p>
+<p class="leer">Nichts gekommen? Sieh im Spam-Ordner nach oder <a href="/anmelden">fordere einen neuen Link an</a>.</p>
+</div>`;
+}
+
+function seiteLinkBestaetigen(person: Person): string {
+  return `<div class="schmal">
+<h1>Anmelden als ${esc(person.name)}</h1>
+<p class="unterzeile">${esc(person.email ?? '')}</p>
+<form method="post" class="felder">
+<button type="submit">Jetzt anmelden</button>
+</form>
+<p class="leer">Du bleibst ${SITZUNG_GUELTIG_TAGE} Tage auf diesem Gerät angemeldet. Der Knopf ist da, weil manche Mailprogramme Links vorab öffnen und sie sonst verbrauchen würden.</p>
+</div>`;
+}
+
+const ROLLEN_WAHL: Rolle[] = ['mitarbeit', 'leitung', 'kundin'];
+
+function seiteTeam(kern: Kern, person: Person): string {
+  const verwalten = darf(person, 'team.verwalten');
+  const projekte = verwalten ? kern.projekte(person) : [];
+  const projektName = new Map<string, Projekt>(projekte.map((p) => [p.id, p]));
+  const liste = `<ul class="team">${kern
+    .team(person)
+    .map((p) => {
+      const projekt = p.projektId ? projektName.get(p.projektId) : undefined;
+      const rolle = `${ROLLEN_NAME[p.rolle]}${projekt ? ` für ${esc(projekt.name)}` : ''}`;
+      let knopf = '';
+      if (verwalten && p.id !== person.id) {
+        knopf = p.aktiv
+          ? `<form method="post" action="/team/${esc(p.id)}/entziehen"><button type="submit" class="leise">Zugang entziehen</button></form>`
+          : `<form method="post" action="/team/${esc(p.id)}/wiedergeben"><button type="submit" class="leise">Zugang wieder geben</button></form>`;
+      }
+      return `<li${p.aktiv ? '' : ' class="inaktiv"'}><div><strong>${esc(p.name)}</strong>
+<small>${esc(p.email ?? 'keine Mail-Adresse')} · ${rolle}${p.aktiv ? '' : ' · kein Zugang mehr'}</small></div>${knopf}</li>`;
+    })
+    .join('')}</ul>`;
+  const neu = verwalten
+    ? `<section><h2>Zugang geben</h2>
+<form method="post" action="/team" class="felder">
+<label for="name">Name</label><input id="name" name="name" required maxlength="80" autocomplete="off">
+<label for="email">Mail-Adresse</label><input id="email" name="email" type="email" required maxlength="254" autocomplete="off">
+<label for="rolle">Rolle</label><select id="rolle" name="rolle">${ROLLEN_WAHL.map(
+        (r) => `<option value="${r}">${ROLLEN_NAME[r]}</option>`,
+      ).join('')}</select>
+<label for="projektId">Projekt, nur für Kund:innen</label><select id="projektId" name="projektId"><option value="">Kein Projekt</option>${projekte
+        .map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`)
+        .join('')}</select>
+<label class="haken"><input type="checkbox" name="einladen" value="ja" checked> Einladung per Mail schicken</label>
+<button type="submit">Zugang geben</button>
+</form>
+<p class="leer">Kund:innen sehen nur ihr Projekt und können dort Material ablegen. Freigaben laufen weiter über den Prüf-Link, dafür braucht niemand einen Zugang.</p>
+</section>`
+    : '';
+  return `<h1>Team</h1><section><h2>Wer Zugang hat</h2>${liste}</section>${neu}`;
+}
+
 // --- Verteiler ----------------------------------------------------------------
 
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const TOKEN = '[A-Za-z0-9_-]{20,}';
 const R = {
   seite: /^\/seiten\/([a-z0-9-]+)$/,
   seiteBild: /^\/seiten\/([a-z0-9-]+)\/bild$/,
-  pruefen: /^\/pruefen\/([A-Za-z0-9_-]{20,})$/,
-  pruefenBild: /^\/pruefen\/([A-Za-z0-9_-]{20,})\/bild$/,
+  pruefen: new RegExp(`^/pruefen/(${TOKEN})$`),
+  pruefenBild: new RegExp(`^/pruefen/(${TOKEN})/bild$`),
+  anmeldeLink: new RegExp(`^/anmelden/(${TOKEN})$`),
   projekt: new RegExp(`^/projekte/(${UUID})$`),
   projektMedien: new RegExp(`^/projekte/(${UUID})/medien$`),
   projektSeite: new RegExp(`^/projekte/(${UUID})/seite$`),
   projektEinreichen: new RegExp(`^/projekte/(${UUID})/einreichen$`),
   medium: new RegExp(`^/medien/(${UUID})$`),
   mediumGesehen: new RegExp(`^/medien/(${UUID})/gesehen$`),
+  zugangEntziehen: new RegExp(`^/team/(${UUID})/entziehen$`),
+  zugangWiedergeben: new RegExp(`^/team/(${UUID})/wiedergeben$`),
 };
 
-async function bearbeite(kern: Kern, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function bearbeite(kern: Kern, e: Einstellungen, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://lokal');
   const pfad = url.pathname;
   const liest = req.method === 'GET' || req.method === 'HEAD';
-  const host = req.headers.host ?? 'localhost';
-  if (!liest) pruefeHerkunft(req);
+  const sicher = e.basisUrl.startsWith('https://');
+  if (!liest) pruefeHerkunft(req, e.basisUrl);
   let m: RegExpExecArray | null;
 
   const statisch = STATISCH[pfad];
@@ -339,16 +429,98 @@ async function bearbeite(kern: Kern, req: IncomingMessage, res: ServerResponse):
     return sendeHtml(res, 200, rahmen('Stand prüfen', seitePruefen(kern, m[1])));
   }
 
-  // Ab hier braucht es eine Person aus der Agentur.
-  const person = personAusCookie(kern, req);
-  const wer = { person, alle: kern.personen(person.agenturId) };
+  // Anmeldung per Mail-Link.
+  const sitzung = sitzungAusCookie(req, sicher);
+  const person = sitzung ? kern.sitzungPerson(sitzung) : null;
 
-  if (liest && pfad === '/') return sendeHtml(res, 200, rahmen('Projekte', seiteUebersicht(kern, person), wer));
+  if (pfad === '/anmelden') {
+    if (person) return umleiten(res, '/');
+    if (req.method === 'POST') {
+      const treffer = kern.anmeldungAnfordern((await formular(req)).get('email') ?? '');
+      if (treffer) {
+        // Nicht abwarten: Sonst verrät die Antwortzeit, ob es die Adresse gibt.
+        e.post
+          .senden({
+            an: treffer.person.email ?? '',
+            betreff: 'Dein Anmelde-Link für das Agenturtool',
+            text: `Hallo ${treffer.person.name},
 
-  if (req.method === 'POST' && pfad === '/wechseln') {
-    const gewaehlt = kern.person((await formular(req)).get('person') ?? '');
-    if (!gewaehlt || gewaehlt.agenturId !== person.agenturId) throw new NichtGefunden('Person nicht gefunden.');
-    return umleiten(res, '/', `person=${gewaehlt.id}; Path=/; HttpOnly; SameSite=Lax`);
+hier ist dein Link zum Anmelden:
+${e.basisUrl}/anmelden/${treffer.token}
+
+Er gilt ${LINK_GUELTIG_MINUTEN} Minuten und funktioniert einmal.
+
+Du hast keinen Link angefordert? Dann kannst du diese Mail ignorieren. Ohne den Link meldet sich niemand an.`,
+          })
+          .catch((fehler: unknown) => console.error('Anmelde-Mail nicht versendet:', fehler));
+      }
+      return sendeHtml(res, 200, rahmen('Link unterwegs', seiteLinkUnterwegs()));
+    }
+    return sendeHtml(res, 200, rahmen('Anmelden', seiteAnmelden()));
+  }
+
+  if ((m = R.anmeldeLink.exec(pfad))) {
+    if (req.method === 'POST') {
+      const { sitzung: neu } = kern.anmeldungEinloesen(m[1]);
+      return umleiten(res, '/', sitzungsCookie(neu, sicher, SITZUNG_GUELTIG_TAGE * 24 * 60 * 60));
+    }
+    return sendeHtml(res, 200, rahmen('Anmelden', seiteLinkBestaetigen(kern.anmeldungPruefen(m[1]))));
+  }
+
+  if (req.method === 'POST' && pfad === '/abmelden') {
+    if (sitzung) kern.abmelden(sitzung);
+    return umleiten(res, '/anmelden', sitzungsCookie('', sicher, 0));
+  }
+
+  // Ab hier braucht es eine angemeldete Person.
+  if (!person) {
+    if (req.method === 'PUT') return sendeJson(res, 401, { fehler: 'Bitte neu anmelden.' });
+    return umleiten(res, '/anmelden');
+  }
+
+  if (liest && pfad === '/') return sendeHtml(res, 200, rahmen('Projekte', seiteUebersicht(kern, person), person));
+
+  if (liest && pfad === '/team') return sendeHtml(res, 200, rahmen('Team', seiteTeam(kern, person), person));
+
+  if (req.method === 'POST' && pfad === '/team') {
+    const felder = await formular(req);
+    const rolle = felder.get('rolle') as Rolle;
+    if (!ROLLEN_WAHL.includes(rolle)) throw new Fehler('Unbekannte Rolle.');
+    const neu = kern.personAnlegen(person, {
+      name: felder.get('name') ?? '',
+      email: felder.get('email') ?? '',
+      rolle,
+      projektId: rolle === 'kundin' ? felder.get('projektId') || null : null,
+    });
+    if (felder.get('einladen') === 'ja') {
+      try {
+        await e.post.senden({
+          an: neu.email ?? '',
+          betreff: 'Dein Zugang zum Agenturtool',
+          text: `Hallo ${neu.name},
+
+${person.name} hat dir einen Zugang zum Agenturtool gegeben.
+Zum Anmelden diese Seite öffnen und deine Mail-Adresse eingeben:
+${e.basisUrl}/anmelden
+
+Ein Passwort brauchst du nicht. Du bekommst jedes Mal einen Link per Mail.`,
+        });
+      } catch (fehler) {
+        console.error('Einladung nicht versendet:', fehler);
+        throw new Fehler(`Der Zugang für ${neu.name} ist angelegt, aber die Einladung ging nicht raus. Die Person kann sich trotzdem unter ${e.basisUrl}/anmelden anmelden.`);
+      }
+    }
+    return umleiten(res, '/team');
+  }
+
+  if (req.method === 'POST' && (m = R.zugangEntziehen.exec(pfad))) {
+    kern.zugangEntziehen(person, m[1]);
+    return umleiten(res, '/team');
+  }
+
+  if (req.method === 'POST' && (m = R.zugangWiedergeben.exec(pfad))) {
+    kern.zugangWiedergeben(person, m[1]);
+    return umleiten(res, '/team');
   }
 
   if (req.method === 'POST' && pfad === '/projekte') {
@@ -358,7 +530,7 @@ async function bearbeite(kern: Kern, req: IncomingMessage, res: ServerResponse):
   }
 
   if (liest && (m = R.projekt.exec(pfad))) {
-    return sendeHtml(res, 200, rahmen('Projekt', seiteProjekt(kern, person, m[1], host), wer));
+    return sendeHtml(res, 200, rahmen('Projekt', seiteProjekt(kern, person, m[1], e.basisUrl), person));
   }
 
   if (req.method === 'PUT' && (m = R.projektMedien.exec(pfad))) {
@@ -410,29 +582,41 @@ function fehlerSeite(res: ServerResponse, fehler: unknown): void {
   else if (fehler instanceof Verboten) [status, text] = [403, fehler.message];
   else if (fehler instanceof Fehler) [status, text] = [400, fehler.message];
   else console.error(fehler);
-  sendeHtml(res, status, rahmen('Hinweis', `<h1>Hinweis</h1><p>${esc(text)}</p><p><a href="/">Zur Projektübersicht</a></p>`));
+  sendeHtml(res, status, rahmen('Hinweis', `<div class="schmal"><h1>Hinweis</h1><p>${esc(text)}</p><p><a href="/">Zur Startseite</a></p></div>`));
 }
 
-export function erstelleServer(kern: Kern): Server {
+export function erstelleServer(kern: Kern, einstellungen: Einstellungen): Server {
+  const e = { ...einstellungen, basisUrl: einstellungen.basisUrl.replace(/\/+$/, '') };
   return createServer((req, res) => {
-    bearbeite(kern, req, res).catch((fehler) => fehlerSeite(res, fehler));
+    bearbeite(kern, e, req, res).catch((fehler) => fehlerSeite(res, fehler));
   });
 }
 
-/** Legt beim ersten Start eine Agentur mit zwei Personen an. */
-export function ersteinrichtung(kern: Kern): void {
-  if (kern.agenturen().length) return;
-  const agentur = kern.agenturAnlegen('Meine Agentur');
-  const leitung = kern.erstePersonAnlegen(agentur.id, 'Leitung');
-  kern.personAnlegen(leitung, { name: 'Mitarbeit', rolle: 'mitarbeit' });
-}
+const LOKALE_HOSTS = ['127.0.0.1', '::1', 'localhost'];
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const kern = new Kern(process.env.DATEN ?? join(process.cwd(), 'daten'));
-  ersteinrichtung(kern);
   const port = Number(process.env.PORT ?? 3000);
-  // Es gibt noch keine Anmeldung, deshalb nur auf diesem Rechner erreichbar.
-  erstelleServer(kern).listen(port, '127.0.0.1', () => {
-    console.log(`Agenturtool läuft auf http://localhost:${port}`);
+  // Standard bleibt 127.0.0.1. Ins Netz geht das Werkzeug über einen Proxy mit HTTPS auf demselben Rechner.
+  const host = process.env.HOST ?? '127.0.0.1';
+  const basisUrl = (process.env.BASIS_URL ?? `http://localhost:${port}`).replace(/\/+$/, '');
+  const entwicklung = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(basisUrl);
+
+  const beenden = (grund: string): never => {
+    console.error(grund);
+    process.exit(1);
+  };
+  if (!LOKALE_HOSTS.includes(host) && !basisUrl.startsWith('https://')) {
+    beenden('Wer außerhalb dieses Rechners lauscht, braucht eine BASIS_URL mit https://.');
+  }
+  const smtp = smtpAusUmgebung(process.env);
+  if (!smtp && !entwicklung) beenden('Ohne SMTP_HOST gehen keine Anmelde-Mails raus. Die Einstellungen stehen in der README.');
+  if (!smtp) console.log('Kein Mailserver eingestellt: Anmelde-Links erscheinen hier im Protokoll.');
+
+  const kern = new Kern(process.env.DATEN ?? join(process.cwd(), 'daten'));
+  if (!kern.agenturen().length) {
+    console.log('Noch keine Agentur eingerichtet. Zuerst: npm run einrichten -- --agentur "Name" --name "Dein Name" --email "du@agentur.de"');
+  }
+  erstelleServer(kern, { basisUrl, post: smtp ?? new Protokollpost() }).listen(port, host, () => {
+    console.log(`Agenturtool läuft auf ${basisUrl} (lauscht auf ${host}:${port})`);
   });
 }
