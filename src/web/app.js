@@ -46,3 +46,34 @@ if (ablage) {
 // Prüf-Link beim Anklicken ganz markieren, damit er sich leicht kopieren lässt.
 const link = document.querySelector('#link');
 if (link) link.addEventListener('focus', () => link.select());
+
+// Editor: Warnung vor dem Verlassen mit ungespeicherten Änderungen,
+// und ein Klick in der Vorschau springt zum passenden Baustein.
+const editor = document.querySelector('[data-editor]');
+if (editor) {
+  let geaendert = false;
+  editor.addEventListener('input', () => {
+    geaendert = true;
+  });
+  editor.addEventListener('submit', () => {
+    geaendert = false;
+  });
+  window.addEventListener('beforeunload', (ereignis) => {
+    if (!geaendert) return;
+    ereignis.preventDefault();
+    ereignis.returnValue = '';
+  });
+  const vorschau = document.querySelector('[data-vorschau]');
+  if (vorschau) {
+    vorschau.addEventListener('click', (ereignis) => {
+      const block = ereignis.target.closest('[data-baustein]');
+      if (!block) return;
+      ereignis.preventDefault();
+      const karte = document.getElementById(`b-${block.dataset.baustein}`);
+      if (!karte) return;
+      karte.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const erstesFeld = karte.querySelector('input:not([type=hidden]), textarea, select');
+      if (erstesFeld) erstesFeld.focus({ preventScroll: true });
+    });
+  }
+}

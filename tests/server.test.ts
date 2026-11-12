@@ -54,6 +54,13 @@ async function anmelden(email: string, ziel = basis): Promise<string> {
   return (eingeloest.headers.get('set-cookie') ?? '').split(';')[0];
 }
 
+// Höchstens fünf Anmelde-Links pro Stunde: Die Tests melden Lea deshalb einmal an und teilen die Sitzung.
+let leaSitzung = '';
+async function alsLea(): Promise<string> {
+  leaSitzung ||= await anmelden('lea@agentur.test');
+  return leaSitzung;
+}
+
 test('Ohne Anmeldung geht nichts außer Anmelden, Prüf-Link und veröffentlichten Seiten', async () => {
   const start = await hole('/');
   assert.equal(start.status, 303);
@@ -107,8 +114,15 @@ test('Anmeldung: Der Link zeigt erst eine Bestätigung, gilt einmal, Abmelden be
   assert.equal((await hole('/', cookie)).status, 303);
 });
 
-test('Der ganze Ablauf: Projekt, Material, Entwurf, Prüf-Link, veröffentlichte Seite', async () => {
-  const cookie = await anmelden('lea@agentur.test');
+/** Die Felder eines Bausteins, wie das Editor-Formular sie schickt. */
+function bausteinFelder(id: string, typ: string, felder: Record<string, string>, gesperrt = false): [string, string][] {
+  return [['baustein', id], [`${id}.typ`, typ], [`${id}.gesperrt`, gesperrt ? 'ja' : 'nein'], ...Object.entries(felder).map(([k, v]): [string, string] => [`${id}.${k}`, v])];
+}
+const sendeListe = (pfad: string, felder: [string, string][], cookie: string): Promise<Response> =>
+  fetch(basis + pfad, { method: 'POST', body: new URLSearchParams(felder), redirect: 'manual', headers: { cookie } });
+
+test('Der ganze Ablauf: Projekt, Material, Seiten aus Bausteinen, Prüf-Link, veröffentlichte Website', async () => {
+  const cookie = await alsLea();
   const angelegt = await sende('/projekte', { name: 'Café Ahoi', kunde: 'Ahoi GmbH' }, cookie);
   assert.equal(angelegt.status, 303);
   const projektPfad = angelegt.headers.get('location') ?? '';
@@ -118,20 +132,51 @@ test('Der ganze Ablauf: Projekt, Material, Entwurf, Prüf-Link, veröffentlichte
     fetch(`${basis}${projektPfad}/medien?name=${encodeURIComponent(name)}`, { method: 'PUT', body, headers: { cookie } });
   assert.deepEqual(await (await hochladen('tresen <1>.png', new Uint8Array(PNG))).json(), { ergebnis: 'neu', dateiname: 'tresen <1>.png' });
   assert.equal((await hochladen('boese.html', '<script>1</script>')).status, 400);
+  assert.ok((await (await hole(projektPfad, cookie)).text()).includes('Noch keine Seite'));
 
-  let seite = await (await hole(projektPfad, cookie)).text();
-  const bildId = /<option value="([0-9a-f-]{36})">tresen &lt;1&gt;\.png<\/option>/.exec(seite)?.[1] ?? '';
-  assert.ok(bildId, 'Das Bild steht maskiert in der Auswahl');
-  assert.ok(seite.includes('Neu'));
+  // Seite anlegen: Sie beginnt mit einem Kopf.
+  const seitePfad = (await sende(`${projektPfad}/seiten`, { titel: 'Start' }, cookie)).headers.get('location') ?? '';
+  assert.match(seitePfad, /\/seiten\/[0-9a-f-]{36}$/);
+  let editor = await (await hole(seitePfad, cookie)).text();
+  const kopfId = /name="baustein" value="([0-9a-f-]{36})"/.exec(editor)?.[1] ?? '';
+  const bildId = /<option value="([0-9a-f-]{36})">tresen &lt;1&gt;\.png<\/option>/.exec(editor)?.[1] ?? '';
+  assert.ok(kopfId && bildId, 'Kopf und maskiertes Bild stehen im Editor');
 
-  await sende(`${projektPfad}/seite`, { ueberschrift: 'Kaffee <am> Hafen', text: 'Täglich ab 8 Uhr.', bildId, bildAlt: '' }, cookie);
-  seite = await (await hole(projektPfad, cookie)).text();
-  assert.ok(seite.includes('Folge: Menschen mit Screenreader'), 'Der Alt-Text-Hinweis erscheint');
+  // Speichern und zugleich einen Text-Baustein hinzufügen.
+  const gespeichert = await sendeListe(
+    seitePfad,
+    [['titel', 'Start'], ...bausteinFelder(kopfId, 'kopf', { ueberschrift: 'Kaffee <am> Hafen', unterzeile: '', bildId, bildAlt: '' }), ['aktion', 'neu'], ['neuTyp', 'text']],
+    cookie,
+  );
+  assert.equal(gespeichert.status, 303);
+  const textId = /#b-([0-9a-f-]{36})$/.exec(gespeichert.headers.get('location') ?? '')?.[1] ?? '';
+  assert.ok(textId, 'Nach dem Hinzufügen springt der Editor zum neuen Baustein');
+  editor = await (await hole(seitePfad, cookie)).text();
+  assert.ok(editor.includes('Menschen mit Screenreader erfahren nicht, was das Bild zeigt.'), 'Der Hinweis zur Bildbeschreibung erscheint');
+  assert.ok(editor.includes('<h1>Kaffee &lt;am&gt; Hafen</h1>'), 'Die Vorschau zeigt den Kopf');
+
+  await sendeListe(
+    seitePfad,
+    [
+      ['titel', 'Start'],
+      ...bausteinFelder(kopfId, 'kopf', { ueberschrift: 'Kaffee <am> Hafen', unterzeile: 'Seit 1998', bildId, bildAlt: 'Tresen' }),
+      ...bausteinFelder(textId, 'text', { text: 'Täglich ab 8 Uhr.' }),
+      ['aktion', 'speichern'],
+    ],
+    cookie,
+  );
+  const unpassend = await sendeListe(seitePfad, [...bausteinFelder(textId, 'knopf', { beschriftung: 'X', ziel: 'javascript:alert(1)' }), ['aktion', 'speichern']], cookie);
+  assert.equal(unpassend.status, 400, 'Gefährliche Ziele werden abgelehnt');
+
+  const kontaktPfad = (await sende(`${projektPfad}/seiten`, { titel: 'Kontakt & Anfahrt' }, cookie)).headers.get('location') ?? '';
+  assert.ok(kontaktPfad);
+  const andererProjektPfad = (await sende('/projekte', { name: 'Anderes' }, cookie)).headers.get('location') ?? '';
+  assert.equal((await hole(`${andererProjektPfad}/seiten/${kontaktPfad.split('/').pop()}`, cookie)).status, 404, 'Seite nur unter ihrem Projekt');
 
   assert.equal((await hole('/seiten/cafe-ahoi')).status, 404);
   await sende(`${projektPfad}/einreichen`, {}, cookie);
-  seite = await (await hole(projektPfad, cookie)).text();
-  const pruefPfad = new RegExp(`value="${BASIS_URL}(/pruefen/[A-Za-z0-9_-]+)"`).exec(seite)?.[1] ?? '';
+  const projektSeite = await (await hole(projektPfad, cookie)).text();
+  const pruefPfad = new RegExp(`value="${BASIS_URL}(/pruefen/[A-Za-z0-9_-]+)"`).exec(projektSeite)?.[1] ?? '';
   assert.ok(pruefPfad, 'Der Prüf-Link steht mit der eingestellten Adresse auf der Projektseite');
 
   // Der Prüf-Link braucht keine Anmeldung.
@@ -139,22 +184,53 @@ test('Der ganze Ablauf: Projekt, Material, Entwurf, Prüf-Link, veröffentlichte
   // „same-origin“ hält das Token von fremden Seiten fern und lässt eigene Formulare durch die Herkunftsprüfung.
   assert.equal(pruefSeite.headers.get('referrer-policy'), 'same-origin');
   const pruefText = await pruefSeite.text();
+  assert.ok(pruefText.includes('2 Seiten neu'));
   assert.ok(pruefText.includes('Kaffee &lt;am&gt; Hafen'));
-  assert.ok(pruefText.includes('Noch nichts veröffentlicht'));
-  assert.equal((await hole(`${pruefPfad}/bild`)).headers.get('content-type'), 'image/png');
+  assert.ok(pruefText.includes('Diese Seite gibt es online noch nicht.'));
+  assert.equal((await hole(`${pruefPfad}/bilder/${bildId}`)).headers.get('content-type'), 'image/png');
 
   assert.equal((await sende(pruefPfad, { entscheidung: 'freigeben', name: '' })).status, 400);
   assert.equal((await sende(pruefPfad, { entscheidung: 'freigeben', name: 'Frau Ahoi' })).status, 303);
 
   const online = await hole('/seiten/cafe-ahoi');
   assert.equal(online.status, 200);
-  assert.ok((await online.text()).includes('<h1>Kaffee &lt;am&gt; Hafen</h1>'));
-  assert.deepEqual(Buffer.from(await (await hole('/seiten/cafe-ahoi/bild')).arrayBuffer()), PNG);
+  const onlineText = await online.text();
+  assert.ok(onlineText.includes('<h1>Kaffee &lt;am&gt; Hafen</h1>'));
+  assert.ok(onlineText.includes('<a href="/seiten/cafe-ahoi/kontakt-anfahrt">Kontakt &amp; Anfahrt</a>'), 'Navigation zu den anderen Seiten');
+  assert.equal((await hole('/seiten/cafe-ahoi/kontakt-anfahrt')).status, 200);
+  assert.equal((await hole('/seiten/cafe-ahoi/gibt-es-nicht')).status, 404);
+  assert.deepEqual(Buffer.from(await (await hole(`/seiten/cafe-ahoi/_bilder/${bildId}`)).arrayBuffer()), PNG);
   assert.ok((await (await hole('/', cookie)).text()).includes('Café Ahoi'));
+
+  // Ein zweiter Stand zeigt nur, was sich geändert hat.
+  await sendeListe(seitePfad, [['titel', 'Start'], ...bausteinFelder(kopfId, 'kopf', { ueberschrift: 'Kaffee am Hafen', bildId, bildAlt: 'Tresen' }), ['aktion', 'speichern']], cookie);
+  await sende(`${projektPfad}/einreichen`, {}, cookie);
+  const zweiterLink = new RegExp(`value="${BASIS_URL}(/pruefen/[A-Za-z0-9_-]+)"`).exec(await (await hole(projektPfad, cookie)).text())?.[1] ?? '';
+  const zweiter = await (await hole(zweiterLink)).text();
+  assert.ok(zweiter.includes('1 Seite geändert') && zweiter.includes('1 Seite bleibt unverändert'));
+});
+
+test('Kund:innen sehen im Editor nur, was sie füllen dürfen', async () => {
+  const leitung = await alsLea();
+  const projektPfad = (await sende('/projekte', { name: 'Bäckerei Korn' }, leitung)).headers.get('location') ?? '';
+  const projektId = projektPfad.split('/').pop() ?? '';
+  const seitePfad = (await sende(`${projektPfad}/seiten`, { titel: 'Start' }, leitung)).headers.get('location') ?? '';
+  const kopfId = /name="baustein" value="([0-9a-f-]{36})"/.exec(await (await hole(seitePfad, leitung)).text())?.[1] ?? '';
+  // Kopf sperren, einen Text für die Kundin anlegen.
+  await sendeListe(seitePfad, [['titel', 'Start'], ...bausteinFelder(kopfId, 'kopf', { ueberschrift: 'Bäckerei Korn' }), ['aktion', `sperren:${kopfId}`]], leitung);
+  await sendeListe(seitePfad, [['titel', 'Start'], ...bausteinFelder(kopfId, 'kopf', {}, true), ['aktion', 'neu'], ['neuTyp', 'text']], leitung);
+  assert.equal((await sende('/team', { name: 'Frau Korn', email: 'korn@kundin.test', rolle: 'kundin', projektId }, leitung)).status, 303);
+
+  const kundin = await anmelden('korn@kundin.test');
+  const editor = await (await hole(seitePfad, kundin)).text();
+  assert.ok(editor.includes('Von der Agentur festgelegt'));
+  assert.ok(!editor.includes('Baustein hinzufügen') && !editor.includes('Seite löschen') && !editor.includes('id="titel"'));
+  assert.ok(editor.includes('<label for="') && editor.includes('.text"'), 'Den Text darf sie füllen');
+  assert.equal((await sende(`${projektPfad}/seiten`, { titel: 'Eigene' }, kundin)).status, 403);
 });
 
 test('Team: Leitung gibt Zugang mit Einladung und entzieht ihn wieder', async () => {
-  const leitung = await anmelden('lea@agentur.test');
+  const leitung = await alsLea();
   const vorher = post.gesendet.length;
   const angelegt = await sende('/team', { name: 'Mo', email: 'mo@agentur.test', rolle: 'mitarbeit', einladen: 'ja' }, leitung);
   assert.equal(angelegt.status, 303);
@@ -170,7 +246,7 @@ test('Team: Leitung gibt Zugang mit Einladung und entzieht ihn wieder', async ()
   assert.ok(!teamSeite.includes('Zugang geben'), 'Mitarbeit sieht das Team, verwaltet es aber nicht');
   assert.equal((await sende('/team', { name: 'Y', email: 'y@agentur.test', rolle: 'leitung' }, mo)).status, 403);
 
-  const moId = /action="\/team\/([0-9a-f-]{36})\/entziehen"/.exec(await (await hole('/team', leitung)).text())?.[1] ?? '';
+  const moId = /<strong>Mo<\/strong>[\s\S]*?action="\/team\/([0-9a-f-]{36})\/entziehen"/.exec(await (await hole('/team', leitung)).text())?.[1] ?? '';
   assert.ok(moId);
   assert.equal((await sende(`/team/${moId}/entziehen`, {}, leitung)).status, 303);
   assert.equal((await hole('/', mo)).status, 303, 'Die Sitzung endet sofort');
@@ -183,7 +259,7 @@ test('Team: Leitung gibt Zugang mit Einladung und entzieht ihn wieder', async ()
 });
 
 test('Schreibende Anfragen von fremden Seiten werden abgelehnt', async () => {
-  const cookie = await anmelden('lea@agentur.test');
+  const cookie = await alsLea();
   const anlegen = (name: string, headers: Record<string, string>) =>
     fetch(`${basis}/projekte`, { method: 'POST', body: new URLSearchParams({ name }), headers: { cookie, ...headers }, redirect: 'manual' });
   assert.equal((await anlegen('Eingeschleust', { Origin: 'https://boese.example' })).status, 403);
@@ -193,7 +269,7 @@ test('Schreibende Anfragen von fremden Seiten werden abgelehnt', async () => {
 });
 
 test('Unbekannte Adressen und ungültige Links liefern 404 oder 400', async () => {
-  const cookie = await anmelden('lea@agentur.test');
+  const cookie = await alsLea();
   assert.equal((await hole('/gibt-es-nicht', cookie)).status, 404);
   assert.equal((await hole(`/pruefen/${'x'.repeat(32)}`)).status, 404);
   assert.equal((await hole('/medien/00000000-0000-0000-0000-000000000000', cookie)).status, 404);

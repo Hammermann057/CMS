@@ -1,7 +1,28 @@
 /* Aussehen der ausgelieferten Seite. Platzhalter, bis das Regelwerk mit Tokens kommt. */
-.oeffentlich { margin: 0; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; color: #17181a; }
+.oeffentlich { margin: 0; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; color: #17181a; background: #fff; }
 .oeffentlich main { max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }
-.seite { font-size: 18px; line-height: 1.6; }
-.seite img { display: block; width: 100%; height: auto; margin-bottom: 24px; }
-.seite h1 { margin: 0 0 16px; font-size: clamp(28px, 6vw, 48px); line-height: 1.1; overflow-wrap: anywhere; }
+
+.website-nav { border-bottom: 1px solid #d5d6d1; }
+.website-nav ul { display: flex; flex-wrap: wrap; gap: 4px 20px; max-width: 760px; margin: 0 auto; padding: 14px 20px; list-style: none; }
+.website-nav a { color: #17181a; text-decoration: none; }
+.website-nav a[aria-current='page'] { font-weight: 700; text-decoration: underline; text-underline-offset: 4px; }
+
+.seite { font-size: 18px; line-height: 1.6; overflow-wrap: anywhere; }
+.seite img { display: block; width: 100%; height: auto; border-radius: 4px; }
 .seite p { margin: 0 0 16px; }
+.seite > * + *, .seite > [data-baustein] + [data-baustein] { margin-top: 24px; }
+
+.b-kopf img { margin-bottom: 24px; }
+.b-kopf h1 { margin: 0; font-size: clamp(28px, 6vw, 48px); line-height: 1.1; }
+.b-kopf .b-unterzeile { margin: 12px 0 0; font-size: 1.15em; color: #4a4d53; }
+.b-zwischen { margin: 40px 0 0; font-size: clamp(22px, 4vw, 30px); line-height: 1.2; }
+.b-bild, .b-zitat { margin: 0; }
+.b-bild figcaption { margin-top: 8px; font-size: 15px; color: #55585f; }
+.b-galerie { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+.b-galerie figure { margin: 0; }
+.b-galerie img { aspect-ratio: 4 / 3; object-fit: cover; }
+.b-zitat blockquote { margin: 0; padding-left: 20px; border-left: 4px solid #17181a; font-size: 1.2em; }
+.b-zitat figcaption { margin-top: 8px; padding-left: 24px; color: #55585f; }
+.b-zitat figcaption::before { content: '– '; }
+.b-knopf a { display: inline-block; padding: 12px 22px; background: #17181a; color: #fff; border-radius: 6px; font-weight: 600; text-decoration: none; }
+.b-knopf a:focus-visible { outline: 3px solid #2b3fe0; outline-offset: 3px; }

@@ -52,12 +52,99 @@ export interface Medium {
   hochgeladenAm: string;
 }
 
-/** Inhalt der einen Seite, die jedes Projekt in Etappe 1 hat. */
-export interface Inhalt {
+// --- Seiten aus Bausteinen ---------------------------------------------------
+
+export type BausteinTyp = 'kopf' | 'text' | 'zwischenueberschrift' | 'bild' | 'galerie' | 'zitat' | 'knopf';
+
+interface BausteinBasis {
+  /** Bleibt über alle Stände gleich, damit sich Bausteine vergleichen und später kommentieren lassen. */
+  id: string;
+  /** Gesperrte Bausteine ändert nur die Agentur. */
+  gesperrt: boolean;
+}
+
+export interface KopfBaustein extends BausteinBasis {
+  typ: 'kopf';
   ueberschrift: string;
-  text: string;
+  unterzeile: string;
   bildId: string | null;
   bildAlt: string;
+}
+
+export interface TextBaustein extends BausteinBasis {
+  typ: 'text';
+  text: string;
+}
+
+export interface ZwischenueberschriftBaustein extends BausteinBasis {
+  typ: 'zwischenueberschrift';
+  text: string;
+}
+
+export interface BildBaustein extends BausteinBasis {
+  typ: 'bild';
+  bildId: string | null;
+  bildAlt: string;
+  unterschrift: string;
+}
+
+export interface GalerieBild {
+  bildId: string;
+  bildAlt: string;
+}
+
+export interface GalerieBaustein extends BausteinBasis {
+  typ: 'galerie';
+  bilder: GalerieBild[];
+}
+
+export interface ZitatBaustein extends BausteinBasis {
+  typ: 'zitat';
+  text: string;
+  quelle: string;
+}
+
+export interface KnopfBaustein extends BausteinBasis {
+  typ: 'knopf';
+  beschriftung: string;
+  /** https://, http://, mailto:, tel: oder ein Pfad auf derselben Website. */
+  ziel: string;
+}
+
+export type Baustein =
+  | KopfBaustein
+  | TextBaustein
+  | ZwischenueberschriftBaustein
+  | BildBaustein
+  | GalerieBaustein
+  | ZitatBaustein
+  | KnopfBaustein;
+
+/** Eine Seite im Entwurf. */
+export interface Seite {
+  id: string;
+  agenturId: string;
+  projektId: string;
+  /** Teil der Adresse, etwa `ueber-uns`. */
+  slug: string;
+  titel: string;
+  position: number;
+  bausteine: Baustein[];
+  geaendertVon: string;
+  geaendertAm: string;
+}
+
+/** Eine Seite, wie sie in einem Stand eingefroren oder online ist. */
+export interface SeitenStand {
+  id: string;
+  slug: string;
+  titel: string;
+  bausteine: Baustein[];
+}
+
+/** Alle Seiten eines Projekts zu einem Zeitpunkt. Die erste ist die Startseite. */
+export interface Website {
+  seiten: SeitenStand[];
 }
 
 export type StandZustand = 'eingereicht' | 'freigegeben' | 'abgelehnt' | 'ersetzt';
@@ -66,8 +153,8 @@ export interface Stand {
   id: string;
   agenturId: string;
   projektId: string;
-  inhalt: Inhalt;
   zustand: StandZustand;
+  inhalt: Website;
   token: string;
   eingereichtVon: string;
   eingereichtAm: string;
@@ -85,8 +172,12 @@ export interface Ereignis {
   zeit: string;
 }
 
+/** Eine Regel, die sich erklärt: was passiert, warum, und was man tun kann. */
 export interface Hinweis {
   regel: string;
   folge: string;
   grund: string;
+  ausweg: string;
+  /** Der Baustein, an dem der Hinweis hängt. `null` gilt für die ganze Seite. */
+  bausteinId: string | null;
 }

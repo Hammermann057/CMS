@@ -6,7 +6,8 @@ export type Aktion =
   | 'projekt.anlegen'
   | 'projekt.ansehen'
   | 'medium.hochladen'
-  | 'seite.bearbeiten'
+  | 'seite.aufbau'
+  | 'seite.inhalt'
   | 'stand.einreichen';
 
 const ERLAUBT: Record<Rolle, readonly Aktion[]> = {
@@ -16,13 +17,14 @@ const ERLAUBT: Record<Rolle, readonly Aktion[]> = {
     'projekt.anlegen',
     'projekt.ansehen',
     'medium.hochladen',
-    'seite.bearbeiten',
+    'seite.aufbau',
+    'seite.inhalt',
     'stand.einreichen',
   ],
-  mitarbeit: ['team.ansehen', 'projekt.anlegen', 'projekt.ansehen', 'medium.hochladen', 'seite.bearbeiten', 'stand.einreichen'],
-  // Kund:innen liefern Material und sehen ihr Projekt. Freigeben können sie
-  // über den Prüf-Link, dafür brauchen sie kein Konto.
-  kundin: ['projekt.ansehen', 'medium.hochladen'],
+  mitarbeit: ['team.ansehen', 'projekt.anlegen', 'projekt.ansehen', 'medium.hochladen', 'seite.aufbau', 'seite.inhalt', 'stand.einreichen'],
+  // Kund:innen liefern Material und füllen Bausteine, die die Agentur nicht gesperrt hat.
+  // Aufbau und Reihenfolge legt die Agentur fest. Freigeben geht über den Prüf-Link, ohne Konto.
+  kundin: ['projekt.ansehen', 'medium.hochladen', 'seite.inhalt'],
 };
 
 export class Verboten extends Error {}

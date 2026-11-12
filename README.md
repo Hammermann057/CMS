@@ -3,7 +3,7 @@
 CMS und Arbeitsraum für Agenturen. Material kommt in ein Projekt, wird dort zur Seite
 und geht erst nach einer Freigabe per Prüf-Link online.
 
-Stand: **Etappe 1** mit Anmeldung per Mail-Link. Der Kern und einmal der ganze Ablauf in klein.
+Stand: **Etappe 1** mit Anmeldung per Mail-Link und dem ersten Teil von **Etappe 3**: Seiten aus Bausteinen.
 
 ## Was schon geht
 
@@ -13,15 +13,25 @@ Stand: **Etappe 1** mit Anmeldung per Mail-Link. Der Kern und einmal der ganze A
 - Projektübersicht mit dem nächsten Schritt je Projekt
 - Material per Drag-and-drop hochladen (PNG, JPEG, WebP, GIF, PDF, bis 25 MB)
 - Neues und geändertes Material wird markiert, bis es jemand als gesehen markiert
-- Eine Seite je Projekt: Überschrift, Text, Bild, Alt-Text
-- Hinweise, die Folge und Grund nennen (Platzhalter für das Regelwerk)
-- Stand einreichen, Prüf-Link weitergeben, ohne Konto freigeben oder Änderung wünschen
-- Die freigegebene Seite wird unter `/seiten/<name>` ausgeliefert
+- **Seiten aus Bausteinen:** beliebig viele Seiten je Projekt, die erste ist die Startseite.
+  Bausteine: Kopf, Text, Zwischenüberschrift, Bild, Galerie, Zitat, Knopf.
+  Verschieben, entfernen, hinzufügen, alles in einem Formular, ohne dass Getipptes verloren geht.
+- **Vorschau** neben dem Editor; ein Klick auf einen Teil der Vorschau springt zum Baustein
+- **Hinweise am Baustein** mit Folge, Grund und Ausweg: fehlende Bildbeschreibung, zu lange Überschrift,
+  Knopf ohne klares Ziel, langer Text ohne Zwischenüberschrift, zweite Hauptüberschrift und mehr.
+  Sie sperren nichts.
+- **Agentur baut, Kund:innen füllen:** Kund:innen ändern nur Inhalte in Bausteinen, die die Agentur
+  nicht gesperrt hat. Titel, Reihenfolge und Aufbau bleiben bei der Agentur, auch wenn jemand am Formular vorbei schickt.
+- Stand einreichen: Alle Seiten werden eingefroren. Der Prüf-Link zeigt Seite für Seite, was neu ist,
+  was sich geändert hat und was entfällt; ohne Konto freigeben oder Änderung wünschen
+- Die freigegebene Website wird unter `/seiten/<projekt>` mit Navigation ausgeliefert.
+  Bilder dort sind nur erreichbar, wenn sie auf der Website vorkommen.
 - Verlauf: wer hat was hochgeladen, geändert, eingereicht, freigegeben
 
 ## Was bewusst noch fehlt
 
-- Kein Editor im Layout, kein Regelwerk mit Tokens (Etappe 3)
+- Noch kein Regelwerk mit Tokens: Farben, Schriften und Abstände der Website sind ein Platzhalter (Etappe 3, zweiter Teil)
+- Text ohne Formatierung wie fett oder Links im Fließtext
 - Kein Eingang über Google Drive, Mail oder Handy (Etappe 2)
 - Keine Kommentare am Element, keine Zeitvorschläge (Etappe 4)
 - Eine Mail-Adresse gehört zu genau einer Agentur. Kund:innen mehrerer Agenturen kommen,
@@ -75,9 +85,11 @@ npm test
 | Ordner | Inhalt |
 | --- | --- |
 | `src/kern/` | Projekte, Personen, Anmeldung, Rechte, Medien, Stände, Verlauf. Kennt kein HTTP. |
-| `src/kern/pruefer.ts` | Hinweise mit Folge und Grund. Wird in Etappe 3 zum Regelwerk. |
+| `src/kern/bausteine.ts` | Bausteine anlegen, prüfen, vergleichen. |
+| `src/kern/pruefer.ts` | Hinweise mit Folge, Grund und Ausweg. Wird zum Regelwerk. |
 | `src/renderer/` | Macht aus dem Inhalt HTML, für Vorschau, Prüf-Link und Website gleich. |
-| `src/server.ts` | Die Oberfläche und die ausgelieferten Seiten. |
+| `src/server.ts` | Verteiler, Anmeldung, Projekte, Team und die ausgelieferten Seiten. |
+| `src/oberflaeche/` | Editor, Seitenliste und Prüf-Link. |
 | `src/post.ts` | Mailversand über SMTP, selbst geschrieben. |
 | `src/einrichten.ts` | Erste Einrichtung über die Kommandozeile. |
 | `src/web/` | Stylesheets und das Skript für die Ablage. |

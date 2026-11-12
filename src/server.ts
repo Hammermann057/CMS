@@ -5,11 +5,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Fehler, Kern, LINK_GUELTIG_MINUTEN, MAX_GROESSE, NichtGefunden, SITZUNG_GUELTIG_TAGE } from './kern/kern.ts';
 import { darf, Verboten } from './kern/rechte.ts';
-import { hinweise } from './kern/pruefer.ts';
-import { esc, renderAusschnitt, renderSeite } from './renderer/seite.ts';
+import { esc, renderWebsite } from './renderer/seite.ts';
+import { ausFormular, seiteEditor, seitePruefen, teilSeiten, wendeAktionAn } from './oberflaeche/editor.ts';
+import { groesse, ROLLEN_NAME, zeit } from './oberflaeche/format.ts';
 import { Protokollpost, smtpAusUmgebung } from './post.ts';
 import type { Post } from './post.ts';
-import type { Ereignis, Hinweis, Medium, Person, Projekt, ProjektUebersicht, Rolle, Stand } from './kern/typen.ts';
+import type { Ereignis, Medium, Person, Projekt, ProjektUebersicht, Rolle, Stand } from './kern/typen.ts';
 
 export interface Einstellungen {
   /** Adresse, unter der das Werkzeug erreichbar ist, etwa `https://tool.agentur.de`. Links in Mails bauen darauf auf. */
@@ -38,15 +39,6 @@ const KOPF_HTML = {
   // und die Herkunftsprüfung unten würde die eigenen Formulare ablehnen.
   'Referrer-Policy': 'same-origin',
 };
-
-const ROLLEN_NAME: Record<Person['rolle'], string> = { leitung: 'Leitung', mitarbeit: 'Mitarbeit', kundin: 'Kund:in' };
-const zeitFormat = new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Europe/Berlin' });
-const zeit = (iso: string): string => zeitFormat.format(new Date(iso));
-
-function groesse(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1).replace('.', ',')} MB`;
-  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-}
 
 // --- Anfrage lesen ------------------------------------------------------------
 
@@ -136,7 +128,7 @@ function sendeMedium(res: ServerResponse, datei: { medium: Medium; daten: Buffer
 
 // --- Seiten -------------------------------------------------------------------
 
-function rahmen(titel: string, inhalt: string, person?: Person): string {
+function rahmen(titel: string, inhalt: string, person?: Person, breit = false): string {
   const navigation = person
     ? `<nav class="navigation" aria-label="Hauptnavigation">
 <a href="/">Projekte</a>${darf(person, 'team.ansehen') ? '<a href="/team">Team</a>' : ''}
@@ -156,7 +148,7 @@ function rahmen(titel: string, inhalt: string, person?: Person): string {
 </head>
 <body>
 <header class="kopf"><a href="/" class="marke">Agenturtool</a>${navigation}</header>
-<main>${inhalt}</main>
+<main${breit ? ' class="breit"' : ''}>${inhalt}</main>
 </body>
 </html>`;
 }
@@ -214,14 +206,7 @@ function teilMedien(person: Person, projektId: string, medien: Medium[]): string
 <p data-ablage-status role="status"></p>
 </div>`
     : '';
-  return `<section><h2>Material</h2>${ablage}${liste}</section>`;
-}
-
-function teilHinweise(liste: Hinweis[]): string {
-  if (!liste.length) return '';
-  return `<ul class="hinweise">${liste
-    .map((h) => `<li><strong>${esc(h.regel)}</strong><span>Folge: ${esc(h.folge)}</span><span>Grund: ${esc(h.grund)}</span></li>`)
-    .join('')}</ul>`;
+  return `<section id="material"><h2>Material</h2>${ablage}${liste}</section>`;
 }
 
 function teilFreigabe(stand: Stand | null, projektId: string, slug: string, basisUrl: string, darfEinreichen: boolean): string {
@@ -232,13 +217,13 @@ function teilFreigabe(stand: Stand | null, projektId: string, slug: string, basi
 <input id="link" readonly value="${esc(basisUrl)}/pruefen/${esc(stand.token)}">`;
   } else if (stand?.zustand === 'freigegeben') {
     zustand = `<p>Freigegeben von ${esc(stand.entschiedenVon)} am ${zeit(stand.entschiedenAm ?? stand.eingereichtAm)}.
-<a href="/seiten/${esc(slug)}">Veröffentlichte Seite ansehen</a></p>`;
+<a href="/seiten/${esc(slug)}">Website ansehen</a></p>`;
   } else if (stand?.zustand === 'abgelehnt') {
     zustand = `<p>Änderung gewünscht von ${esc(stand.entschiedenVon)} am ${zeit(stand.entschiedenAm ?? stand.eingereichtAm)}.</p>
 ${stand.kommentar ? `<blockquote>${esc(stand.kommentar)}</blockquote>` : ''}`;
   }
   const knopf = darfEinreichen
-    ? `<form method="post" action="/projekte/${esc(projektId)}/einreichen"><button type="submit">Gespeicherten Entwurf als Stand einreichen</button></form>`
+    ? `<form method="post" action="/projekte/${esc(projektId)}/einreichen"><button type="submit">Alle Seiten als Stand einreichen</button></form>`
     : '';
   return `<section><h2>Freigabe</h2>${zustand}${knopf}</section>`;
 }
@@ -251,65 +236,13 @@ function teilVerlauf(ereignisse: Ereignis[]): string {
 
 function seiteProjekt(kern: Kern, person: Person, projektId: string, basisUrl: string): string {
   const projekt = kern.projekt(person, projektId);
-  const medien = kern.medien(person, projektId);
-  const { entwurf } = kern.seite(person, projektId);
-  const bilder = medien.filter((m) => m.typ.startsWith('image/'));
-  const bearbeiten = darf(person, 'seite.bearbeiten', projekt);
-  const formularSeite = bearbeiten
-    ? `<form method="post" action="/projekte/${esc(projekt.id)}/seite" class="felder">
-<label for="ueberschrift">Überschrift</label><input id="ueberschrift" name="ueberschrift" value="${esc(entwurf.ueberschrift)}" maxlength="200">
-<label for="text">Text</label><textarea id="text" name="text" rows="8">${esc(entwurf.text)}</textarea>
-<label for="bildId">Bild</label><select id="bildId" name="bildId"><option value="">Kein Bild</option>${bilder
-        .map((m) => `<option value="${esc(m.id)}"${m.id === entwurf.bildId ? ' selected' : ''}>${esc(m.dateiname)}</option>`)
-        .join('')}</select>
-<label for="bildAlt">Alt-Text zum Bild</label><input id="bildAlt" name="bildAlt" value="${esc(entwurf.bildAlt)}" maxlength="300">
-<button type="submit">Entwurf speichern</button>
-</form>`
-    : '';
-  const vorschau = entwurf.ueberschrift
-    ? `<div class="vorschau">${renderAusschnitt(entwurf, entwurf.bildId ? `/medien/${entwurf.bildId}` : null)}</div>`
-    : '';
   return `<p class="pfad"><a href="/">Projekte</a></p>
 <h1>${esc(projekt.name)}</h1>
 ${projekt.kunde ? `<p class="unterzeile">${esc(projekt.kunde)}</p>` : ''}
-${teilMedien(person, projekt.id, medien)}
-<section><h2>Seite</h2>${formularSeite}${teilHinweise(hinweise(entwurf))}${vorschau}</section>
+${teilSeiten(person, projekt, kern.seiten(person, projekt.id))}
+${teilMedien(person, projekt.id, kern.medien(person, projekt.id))}
 ${teilFreigabe(kern.letzterStand(person, projekt.id), projekt.id, projekt.slug, basisUrl, darf(person, 'stand.einreichen', projekt))}
 ${teilVerlauf(kern.verlauf(person, projekt.id))}`;
-}
-
-function seitePruefen(kern: Kern, token: string): string {
-  const { stand, projekt, veroeffentlicht } = kern.standPerToken(token);
-  const bisher = veroeffentlicht
-    ? renderAusschnitt(veroeffentlicht, veroeffentlicht.bildId ? `/seiten/${projekt.slug}/bild` : null)
-    : '<p class="leer">Noch nichts veröffentlicht.</p>';
-  const neu = renderAusschnitt(stand.inhalt, stand.inhalt.bildId ? `/pruefen/${token}/bild` : null);
-  let entscheidung = '';
-  if (stand.zustand === 'eingereicht') {
-    entscheidung = `<form method="post" class="felder">
-<label for="name">Ihr Name</label><input id="name" name="name" required maxlength="80" autocomplete="name">
-<label for="kommentar">Anmerkung</label><textarea id="kommentar" name="kommentar" rows="3" maxlength="2000"></textarea>
-<div class="knoepfe">
-<button type="submit" name="entscheidung" value="freigeben">Freigeben und veröffentlichen</button>
-<button type="submit" name="entscheidung" value="aendern" class="zweit">Änderung wünschen</button>
-</div>
-</form>`;
-  } else if (stand.zustand === 'freigegeben') {
-    entscheidung = `<p class="erledigt">Freigegeben von ${esc(stand.entschiedenVon)} am ${zeit(stand.entschiedenAm ?? stand.eingereichtAm)}.
-<a href="/seiten/${esc(projekt.slug)}">Veröffentlichte Seite ansehen</a></p>`;
-  } else if (stand.zustand === 'abgelehnt') {
-    entscheidung = `<p class="erledigt">Änderung gewünscht von ${esc(stand.entschiedenVon)}. Die Agentur meldet sich mit einem neuen Stand.</p>`;
-  } else {
-    entscheidung = '<p class="erledigt">Dieser Stand wurde durch einen neueren ersetzt.</p>';
-  }
-  return `<h1>Stand zur Freigabe: ${esc(projekt.name)}</h1>
-<p class="unterzeile">Eingereicht von ${esc(stand.eingereichtVon)} am ${zeit(stand.eingereichtAm)}</p>
-<div class="vergleich">
-<section><h2>Bisher online</h2><div class="vorschau">${bisher}</div></section>
-<section><h2>Neuer Stand</h2><div class="vorschau">${neu}</div></section>
-</div>
-${teilHinweise(hinweise(stand.inhalt))}
-<section><h2>Entscheidung</h2>${entscheidung}</section>`;
 }
 
 function seiteAnmelden(): string {
@@ -415,21 +348,42 @@ function seiteTeam(kern: Kern, person: Person): string {
 
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const TOKEN = '[A-Za-z0-9_-]{20,}';
+const SLUG = '[a-z0-9-]+';
 const R = {
-  seite: /^\/seiten\/([a-z0-9-]+)$/,
-  seiteBild: /^\/seiten\/([a-z0-9-]+)\/bild$/,
+  website: new RegExp(`^/seiten/(${SLUG})$`),
+  websiteSeite: new RegExp(`^/seiten/(${SLUG})/(${SLUG})$`),
+  websiteBild: new RegExp(`^/seiten/(${SLUG})/_bilder/(${UUID})$`),
   pruefen: new RegExp(`^/pruefen/(${TOKEN})$`),
-  pruefenBild: new RegExp(`^/pruefen/(${TOKEN})/bild$`),
+  pruefenBild: new RegExp(`^/pruefen/(${TOKEN})/bilder/(${UUID})$`),
   anmeldeLink: new RegExp(`^/anmelden/(${TOKEN})$`),
   projekt: new RegExp(`^/projekte/(${UUID})$`),
   projektMedien: new RegExp(`^/projekte/(${UUID})/medien$`),
-  projektSeite: new RegExp(`^/projekte/(${UUID})/seite$`),
+  projektSeiten: new RegExp(`^/projekte/(${UUID})/seiten$`),
+  seite: new RegExp(`^/projekte/(${UUID})/seiten/(${UUID})$`),
+  seiteVerschieben: new RegExp(`^/projekte/(${UUID})/seiten/(${UUID})/verschieben$`),
+  seiteLoeschen: new RegExp(`^/projekte/(${UUID})/seiten/(${UUID})/loeschen$`),
   projektEinreichen: new RegExp(`^/projekte/(${UUID})/einreichen$`),
   medium: new RegExp(`^/medien/(${UUID})$`),
   mediumGesehen: new RegExp(`^/medien/(${UUID})/gesehen$`),
   zugangEntziehen: new RegExp(`^/team/(${UUID})/entziehen$`),
   zugangWiedergeben: new RegExp(`^/team/(${UUID})/wiedergeben$`),
 };
+
+/** Zeigt eine Seite der veröffentlichten Website. */
+function sendeWebsite(kern: Kern, res: ServerResponse, projektSlug: string, seitenSlug: string | null): void {
+  const online = kern.veroeffentlicht(projektSlug);
+  const seite = online && (seitenSlug === null ? online.website.seiten[0] : online.website.seiten.find((s) => s.slug === seitenSlug));
+  if (!online || !seite) throw new NichtGefunden('Diese Seite ist nicht veröffentlicht.');
+  sendeHtml(
+    res,
+    200,
+    renderWebsite(online.website, seite, {
+      projektName: online.projekt.name,
+      bildUrl: (id) => `/seiten/${projektSlug}/_bilder/${id}`,
+      seitenUrl: (s, i) => (i === 0 ? `/seiten/${projektSlug}` : `/seiten/${projektSlug}/${s.slug}`),
+    }),
+  );
+}
 
 async function bearbeite(kern: Kern, e: Einstellungen, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://lokal');
@@ -446,15 +400,11 @@ async function bearbeite(kern: Kern, e: Einstellungen, req: IncomingMessage, res
     return;
   }
 
-  // Öffentlich: veröffentlichte Seite und Prüf-Link.
-  if (liest && (m = R.seite.exec(pfad))) {
-    const seite = kern.veroeffentlicht(m[1]);
-    if (!seite) throw new NichtGefunden('Diese Seite ist nicht veröffentlicht.');
-    sendeHtml(res, 200, renderSeite(seite.inhalt, seite.inhalt.bildId ? `/seiten/${m[1]}/bild` : null));
-    return;
-  }
-  if (liest && (m = R.seiteBild.exec(pfad))) return sendeMedium(res, kern.bildVeroeffentlicht(m[1]));
-  if (liest && (m = R.pruefenBild.exec(pfad))) return sendeMedium(res, kern.bildZumStand(m[1]));
+  // Öffentlich: veröffentlichte Website und Prüf-Link.
+  if (liest && (m = R.website.exec(pfad))) return sendeWebsite(kern, res, m[1], null);
+  if (liest && (m = R.websiteBild.exec(pfad))) return sendeMedium(res, kern.bildVeroeffentlicht(m[1], m[2]));
+  if (liest && (m = R.websiteSeite.exec(pfad))) return sendeWebsite(kern, res, m[1], m[2]);
+  if (liest && (m = R.pruefenBild.exec(pfad))) return sendeMedium(res, kern.bildZumStand(m[1], m[2]));
   if ((m = R.pruefen.exec(pfad))) {
     if (req.method === 'POST') {
       const felder = await formular(req);
@@ -465,7 +415,7 @@ async function bearbeite(kern: Kern, e: Einstellungen, req: IncomingMessage, res
       });
       return umleiten(res, pfad);
     }
-    return sendeHtml(res, 200, rahmen('Stand prüfen', seitePruefen(kern, m[1])));
+    return sendeHtml(res, 200, rahmen('Stand prüfen', seitePruefen(kern.standPerToken(m[1]), m[1]), undefined, true));
   }
 
   // Anmeldung per Mail-Link.
@@ -607,15 +557,39 @@ Ein Passwort brauchst du nicht. Du bekommst jedes Mal einen Link per Mail.`,
     }
   }
 
-  if (req.method === 'POST' && (m = R.projektSeite.exec(pfad))) {
-    const felder = await formular(req);
-    kern.seiteSpeichern(person, m[1], {
-      ueberschrift: felder.get('ueberschrift') ?? '',
-      text: felder.get('text') ?? '',
-      bildId: felder.get('bildId') || null,
-      bildAlt: felder.get('bildAlt') ?? '',
-    });
-    return umleiten(res, `/projekte/${m[1]}`);
+  if (req.method === 'POST' && (m = R.projektSeiten.exec(pfad))) {
+    const seite = kern.seiteAnlegen(person, m[1], (await formular(req)).get('titel') ?? '');
+    return umleiten(res, `/projekte/${m[1]}/seiten/${seite.id}`);
+  }
+
+  if ((m = R.seite.exec(pfad))) {
+    const [, projektId, seiteId] = m;
+    const seite = kern.seite(person, seiteId);
+    if (seite.projektId !== projektId) throw new NichtGefunden('Seite nicht gefunden.');
+    if (liest) {
+      const projekt = kern.projekt(person, projektId);
+      return sendeHtml(res, 200, rahmen(seite.titel, seiteEditor(person, projekt, seite, kern.medien(person, projektId), e.basisUrl), person, true));
+    }
+    if (req.method === 'POST') {
+      const felder = await formular(req);
+      const eingabe = ausFormular(felder);
+      const { bausteine, ziel } = wendeAktionAn(eingabe.bausteine, felder.get('aktion') ?? 'speichern', felder.get('neuTyp'));
+      kern.seiteSpeichern(person, seiteId, { titel: eingabe.titel, bausteine });
+      return umleiten(res, `/projekte/${projektId}/seiten/${seiteId}${ziel ? `#b-${ziel}` : ''}`);
+    }
+  }
+
+  if (req.method === 'POST' && (m = R.seiteVerschieben.exec(pfad))) {
+    if (kern.seite(person, m[2]).projektId !== m[1]) throw new NichtGefunden('Seite nicht gefunden.');
+    kern.seiteVerschieben(person, m[2], (await formular(req)).get('richtung') === 'hoch' ? -1 : 1);
+    return umleiten(res, `/projekte/${m[1]}#seiten`);
+  }
+
+  if (req.method === 'POST' && (m = R.seiteLoeschen.exec(pfad))) {
+    if (kern.seite(person, m[2]).projektId !== m[1]) throw new NichtGefunden('Seite nicht gefunden.');
+    if ((await formular(req)).get('sicher') !== 'ja') throw new Fehler('Zum Löschen bitte das Häkchen setzen.');
+    kern.seiteLoeschen(person, m[2]);
+    return umleiten(res, `/projekte/${m[1]}#seiten`);
   }
 
   if (req.method === 'POST' && (m = R.projektEinreichen.exec(pfad))) {

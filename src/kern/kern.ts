@@ -4,24 +4,26 @@ import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { darf, Verboten } from './rechte.ts';
 import type { Aktion } from './rechte.ts';
+import { Fehler, NichtGefunden } from './fehler.ts';
+import { bereinige, bilderIn, gleich, MAX_BAUSTEINE, neuerBaustein, verschiebe } from './bausteine.ts';
 import type {
   Agentur,
+  Baustein,
   Ereignis,
-  Inhalt,
   Medium,
   Person,
   Projekt,
   ProjektUebersicht,
   Rolle,
+  Seite,
+  SeitenStand,
   Stand,
+  Website,
 } from './typen.ts';
 
-/** Fehler, dessen Text der Person gezeigt werden darf. */
-export class Fehler extends Error {}
-export class NichtGefunden extends Error {}
+export { Fehler, NichtGefunden };
 
 export const MAX_GROESSE = 25 * 1024 * 1024;
-export const LEERER_INHALT: Inhalt = { ueberschrift: '', text: '', bildId: null, bildAlt: '' };
 
 const ENDUNG: Record<string, string> = {
   'image/png': 'png',
@@ -50,8 +52,14 @@ CREATE TABLE IF NOT EXISTS medium (
   UNIQUE (projekt_id, dateiname)
 );
 CREATE TABLE IF NOT EXISTS seite (
+  id TEXT PRIMARY KEY, agentur_id TEXT NOT NULL, projekt_id TEXT NOT NULL REFERENCES projekt(id),
+  slug TEXT NOT NULL, titel TEXT NOT NULL, position INTEGER NOT NULL, bausteine TEXT NOT NULL,
+  geaendert_von TEXT NOT NULL, geaendert_am TEXT NOT NULL,
+  UNIQUE (projekt_id, slug)
+);
+CREATE TABLE IF NOT EXISTS veroeffentlichung (
   projekt_id TEXT PRIMARY KEY REFERENCES projekt(id), agentur_id TEXT NOT NULL,
-  entwurf TEXT NOT NULL, veroeffentlicht TEXT, geaendert_am TEXT NOT NULL
+  website TEXT NOT NULL, stand_id TEXT NOT NULL, veroeffentlicht_am TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS stand (
   id TEXT PRIMARY KEY, agentur_id TEXT NOT NULL, projekt_id TEXT NOT NULL REFERENCES projekt(id),
@@ -176,12 +184,50 @@ function alsMedium(z: Zeile): Medium {
   };
 }
 
+/** Etappe 1 kannte eine Seite mit Überschrift, Text und Bild. So sieht sie als Bausteine aus. */
+interface InhaltEtappe1 {
+  ueberschrift: string;
+  text: string;
+  bildId: string | null;
+  bildAlt: string;
+}
+
+function ausEtappe1(alt: InhaltEtappe1, kennung: string): Baustein[] {
+  const bausteine: Baustein[] = [
+    { id: `${kennung}-kopf`, gesperrt: false, typ: 'kopf', ueberschrift: alt.ueberschrift ?? '', unterzeile: '', bildId: alt.bildId ?? null, bildAlt: alt.bildAlt ?? '' },
+  ];
+  if (alt.text) bausteine.push({ id: `${kennung}-text`, gesperrt: false, typ: 'text', text: alt.text });
+  return bausteine;
+}
+
+function websiteAus(json: string, kennung: string): Website {
+  const roh = JSON.parse(json) as Website | InhaltEtappe1;
+  if ('seiten' in roh) return roh;
+  return { seiten: [{ id: `${kennung}-seite`, slug: 'startseite', titel: 'Startseite', bausteine: ausEtappe1(roh, kennung) }] };
+}
+
+function alsSeite(z: Zeile): Seite {
+  return {
+    id: String(z.id),
+    agenturId: String(z.agentur_id),
+    projektId: String(z.projekt_id),
+    slug: String(z.slug),
+    titel: String(z.titel),
+    position: Number(z.position),
+    bausteine: JSON.parse(String(z.bausteine)) as Baustein[],
+    geaendertVon: String(z.geaendert_von),
+    geaendertAm: String(z.geaendert_am),
+  };
+}
+
+const alsSeitenStand = (s: Seite): SeitenStand => ({ id: s.id, slug: s.slug, titel: s.titel, bausteine: s.bausteine });
+
 function alsStand(z: Zeile): Stand {
   return {
     id: String(z.id),
     agenturId: String(z.agentur_id),
     projektId: String(z.projekt_id),
-    inhalt: JSON.parse(String(z.inhalt)) as Inhalt,
+    inhalt: websiteAus(String(z.inhalt), String(z.id)),
     zustand: String(z.zustand) as Stand['zustand'],
     token: String(z.token),
     eingereichtVon: String(z.eingereicht_von),
@@ -207,13 +253,51 @@ export class Kern {
     mkdirSync(this.#medienOrdner, { recursive: true });
     this.#db = new DatabaseSync(join(verzeichnis, 'kern.sqlite'));
     this.#db.exec('PRAGMA foreign_keys = ON');
+    const alteSeiten = this.#spalten('seite').has('entwurf');
+    if (alteSeiten) this.#db.exec('ALTER TABLE seite RENAME TO seite_etappe1');
     this.#db.exec(SCHEMA);
     this.#ergaenzeAlteDatenbank();
+    if (alteSeiten) this.#seitenAusEtappe1();
   }
 
   /** Datenbanken aus Etappe 1 kennen noch keine Mail-Adressen. */
+  #spalten(tabelle: string): Set<string> {
+    return new Set((this.#db.prepare(`PRAGMA table_info(${tabelle})`).all() as Zeile[]).map((z) => String(z.name)));
+  }
+
+  /** Aus der einen Seite je Projekt in Etappe 1 wird eine Startseite aus Bausteinen. */
+  #seitenAusEtappe1(): void {
+    this.#db.exec('BEGIN');
+    try {
+      for (const z of this.#db.prepare('SELECT * FROM seite_etappe1').all() as Zeile[]) {
+        const projektId = String(z.projekt_id);
+        const id = randomUUID();
+        const bausteine = ausEtappe1(JSON.parse(String(z.entwurf)) as InhaltEtappe1, id).map((b) => ({ ...b, id: randomUUID() }));
+        this.#db
+          .prepare(
+            `INSERT INTO seite (id, agentur_id, projekt_id, slug, titel, position, bausteine, geaendert_von, geaendert_am)
+             VALUES (?, ?, ?, 'startseite', 'Startseite', 0, ?, 'Übernahme aus Etappe 1', ?)`,
+          )
+          .run(id, String(z.agentur_id), projektId, JSON.stringify(bausteine), String(z.geaendert_am));
+        if (z.veroeffentlicht !== null) {
+          const stand = this.#db
+            .prepare(`SELECT id FROM stand WHERE projekt_id = ? AND zustand = 'freigegeben' ORDER BY entschieden_am DESC LIMIT 1`)
+            .get(projektId) as Zeile | undefined;
+          this.#db
+            .prepare('INSERT INTO veroeffentlichung (projekt_id, agentur_id, website, stand_id, veroeffentlicht_am) VALUES (?, ?, ?, ?, ?)')
+            .run(projektId, String(z.agentur_id), JSON.stringify(websiteAus(String(z.veroeffentlicht), projektId)), String(stand?.id ?? ''), String(z.geaendert_am));
+        }
+      }
+      this.#db.exec('DROP TABLE seite_etappe1');
+      this.#db.exec('COMMIT');
+    } catch (fehler) {
+      this.#db.exec('ROLLBACK');
+      throw fehler;
+    }
+  }
+
   #ergaenzeAlteDatenbank(): void {
-    const spalten = new Set((this.#db.prepare('PRAGMA table_info(person)').all() as Zeile[]).map((z) => String(z.name)));
+    const spalten = this.#spalten('person');
     if (!spalten.has('email')) this.#db.exec('ALTER TABLE person ADD COLUMN email TEXT');
     if (!spalten.has('aktiv')) this.#db.exec('ALTER TABLE person ADD COLUMN aktiv INTEGER NOT NULL DEFAULT 1');
     this.#db.exec('CREATE UNIQUE INDEX IF NOT EXISTS person_email ON person (email) WHERE email IS NOT NULL');
@@ -430,7 +514,7 @@ export class Kern {
         `SELECT p.*,
            (SELECT COUNT(*) FROM medium m WHERE m.projekt_id = p.id AND m.zustand != 'gesehen') AS neue_medien,
            (SELECT COUNT(*) FROM stand s WHERE s.projekt_id = p.id AND s.zustand = 'eingereicht') AS offen,
-           (SELECT COUNT(*) FROM seite t WHERE t.projekt_id = p.id AND t.veroeffentlicht IS NOT NULL) AS online
+           (SELECT COUNT(*) FROM veroeffentlichung v WHERE v.projekt_id = p.id) AS online
          FROM projekt p WHERE p.agentur_id = ? ORDER BY p.angelegt_am DESC`,
       )
       .all(als.agenturId) as Zeile[];
@@ -532,63 +616,145 @@ export class Kern {
     return { medium: alsMedium(z), ablage: String(z.datei) };
   }
 
-  /** Bild eines Inhalts ohne Anmeldung, nur für Prüf-Link und veröffentlichte Seite. */
-  #bildZuInhalt(projektId: string, inhalt: Inhalt): { medium: Medium; daten: Buffer } | null {
-    if (!inhalt.bildId) return null;
-    const z = this.#db
-      .prepare('SELECT * FROM medium WHERE id = ? AND projekt_id = ?')
-      .get(inhalt.bildId, projektId) as Zeile | undefined;
+  /** Bilder des Projekts, die sich in Bausteine einsetzen lassen. */
+  #bilderDesProjekts(projektId: string): Set<string> {
+    const zeilen = this.#db.prepare(`SELECT id FROM medium WHERE projekt_id = ? AND typ LIKE 'image/%'`).all(projektId) as Zeile[];
+    return new Set(zeilen.map((z) => String(z.id)));
+  }
+
+  /** Bild ohne Anmeldung, nur wenn es in dieser Website vorkommt: für Prüf-Link und veröffentlichte Seiten. */
+  #bildAusWebsite(projektId: string, website: Website, mediumId: string): { medium: Medium; daten: Buffer } | null {
+    if (!website.seiten.some((s) => bilderIn(s.bausteine).includes(mediumId))) return null;
+    const z = this.#db.prepare('SELECT * FROM medium WHERE id = ? AND projekt_id = ?').get(mediumId, projektId) as Zeile | undefined;
     if (!z) return null;
     return { medium: alsMedium(z), daten: readFileSync(join(this.#medienOrdner, String(z.datei))) };
   }
 
-  // --- Seite ----------------------------------------------------------------
+  // --- Seiten ---------------------------------------------------------------
 
-  seite(als: Person, projektId: string): { entwurf: Inhalt; veroeffentlicht: Inhalt | null } {
+  seiten(als: Person, projektId: string): Seite[] {
     const projekt = this.#projektMitRecht(als, projektId, 'projekt.ansehen');
-    return this.#seiteLaden(projekt.id);
+    return this.#seitenLaden(projekt.id);
   }
 
-  #seiteLaden(projektId: string): { entwurf: Inhalt; veroeffentlicht: Inhalt | null } {
-    const z = this.#db.prepare('SELECT * FROM seite WHERE projekt_id = ?').get(projektId) as Zeile | undefined;
-    if (!z) return { entwurf: { ...LEERER_INHALT }, veroeffentlicht: null };
-    return {
-      entwurf: JSON.parse(String(z.entwurf)) as Inhalt,
-      veroeffentlicht: z.veroeffentlicht === null ? null : (JSON.parse(String(z.veroeffentlicht)) as Inhalt),
-    };
+  #seitenLaden(projektId: string): Seite[] {
+    const zeilen = this.#db.prepare('SELECT * FROM seite WHERE projekt_id = ? ORDER BY position, rowid').all(projektId) as Zeile[];
+    return zeilen.map(alsSeite);
   }
 
-  seiteSpeichern(als: Person, projektId: string, eingabe: Partial<Inhalt>): Inhalt {
-    const projekt = this.#projektMitRecht(als, projektId, 'seite.bearbeiten');
-    let bildId: string | null = eingabe.bildId ? String(eingabe.bildId) : null;
-    if (bildId) {
-      const bild = this.#db
-        .prepare('SELECT typ FROM medium WHERE id = ? AND projekt_id = ?')
-        .get(bildId, projekt.id) as Zeile | undefined;
-      if (!bild || !String(bild.typ).startsWith('image/')) throw new Fehler('Das gewählte Bild gehört nicht zu diesem Projekt.');
-    }
-    const inhalt: Inhalt = {
-      ueberschrift: kurz(eingabe.ueberschrift, 200),
-      text: kurz(eingabe.text, 20000),
-      bildId,
-      bildAlt: bildId ? kurz(eingabe.bildAlt, 300) : '',
+  seite(als: Person, seiteId: string): Seite {
+    return this.#seiteMitRecht(als, seiteId, 'projekt.ansehen').seite;
+  }
+
+  #seiteMitRecht(als: Person, seiteId: string, aktion: Aktion): { seite: Seite; projekt: Projekt } {
+    const z = this.#db.prepare('SELECT * FROM seite WHERE id = ?').get(seiteId) as Zeile | undefined;
+    if (!z) throw new NichtGefunden('Seite nicht gefunden.');
+    const projekt = this.#projektMitRecht(als, String(z.projekt_id), aktion);
+    return { seite: alsSeite(z), projekt };
+  }
+
+  #freierSeitenSlug(projektId: string, titel: string, ausser?: string): string {
+    const belegt = this.#db.prepare('SELECT 1 FROM seite WHERE projekt_id = ? AND slug = ? AND id != ?');
+    const basis = slugAus(titel) === 'projekt' ? 'seite' : slugAus(titel);
+    let slug = basis;
+    for (let n = 2; belegt.get(projektId, slug, ausser ?? ''); n++) slug = `${basis}-${n}`;
+    return slug;
+  }
+
+  /** Neue Seite am Ende. Sie beginnt mit einem Kopf, in dem schon der Titel steht. */
+  seiteAnlegen(als: Person, projektId: string, eingabeTitel: string): Seite {
+    const projekt = this.#projektMitRecht(als, projektId, 'seite.aufbau');
+    const titel = kurz(eingabeTitel, 80);
+    if (!titel) throw new Fehler('Die Seite braucht einen Titel.');
+    const anzahl = this.#db.prepare('SELECT COUNT(*) AS n, MAX(position) AS letzte FROM seite WHERE projekt_id = ?').get(projekt.id) as Zeile;
+    if (Number(anzahl.n) >= 50) throw new Fehler('Mehr als 50 Seiten hat ein Projekt nicht.');
+    const kopf = neuerBaustein('kopf');
+    if (kopf.typ === 'kopf') kopf.ueberschrift = titel;
+    const seite: Seite = {
+      id: randomUUID(),
+      agenturId: projekt.agenturId,
+      projektId: projekt.id,
+      slug: this.#freierSeitenSlug(projekt.id, titel),
+      titel,
+      position: anzahl.letzte === null ? 0 : Number(anzahl.letzte) + 1,
+      bausteine: [kopf],
+      geaendertVon: als.name,
+      geaendertAm: this.#jetzt(),
     };
     this.#db
       .prepare(
-        `INSERT INTO seite (projekt_id, agentur_id, entwurf, veroeffentlicht, geaendert_am) VALUES (?, ?, ?, NULL, ?)
-         ON CONFLICT (projekt_id) DO UPDATE SET entwurf = excluded.entwurf, geaendert_am = excluded.geaendert_am`,
+        `INSERT INTO seite (id, agentur_id, projekt_id, slug, titel, position, bausteine, geaendert_von, geaendert_am)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(projekt.id, projekt.agenturId, JSON.stringify(inhalt), this.#jetzt());
-    this.#merke(projekt, als.name, 'seite.gespeichert', 'Entwurf der Seite gespeichert');
-    return inhalt;
+      .run(seite.id, seite.agenturId, seite.projektId, seite.slug, seite.titel, seite.position, JSON.stringify(seite.bausteine), seite.geaendertVon, seite.geaendertAm);
+    this.#merke(projekt, als.name, 'seite.angelegt', `Seite „${titel}“ angelegt`);
+    return seite;
+  }
+
+  /**
+   * Speichert Titel und Bausteine einer Seite.
+   * Die Agentur darf alles. Kund:innen ändern nur Inhalte in Bausteinen, die nicht gesperrt sind:
+   * Titel, Reihenfolge, Art und Sperre bleiben, wie die Agentur sie angelegt hat, egal was ankommt.
+   */
+  seiteSpeichern(als: Person, seiteId: string, eingabe: { titel?: string; bausteine: unknown[] }): Seite {
+    const { seite: alt, projekt } = this.#seiteMitRecht(als, seiteId, 'seite.inhalt');
+    if (!Array.isArray(eingabe.bausteine)) throw new Fehler('Keine Bausteine übergeben.');
+    if (eingabe.bausteine.length > MAX_BAUSTEINE) throw new Fehler(`Mehr als ${MAX_BAUSTEINE} Bausteine hat eine Seite nicht.`);
+    const bilder = this.#bilderDesProjekts(projekt.id);
+    const neu = eingabe.bausteine.map((b) => bereinige(b, bilder));
+    if (new Set(neu.map((b) => b.id)).size !== neu.length) throw new Fehler('Zwei Bausteine haben dieselbe Kennung.');
+
+    let titel = alt.titel;
+    let slug = alt.slug;
+    let bausteine: Baustein[];
+    if (darf(als, 'seite.aufbau', projekt)) {
+      bausteine = neu;
+      const neuerTitel = kurz(eingabe.titel ?? alt.titel, 80);
+      if (!neuerTitel) throw new Fehler('Die Seite braucht einen Titel.');
+      if (neuerTitel !== alt.titel) {
+        titel = neuerTitel;
+        slug = this.#freierSeitenSlug(projekt.id, titel, alt.id);
+      }
+    } else {
+      const eingang = new Map(neu.map((b) => [b.id, b]));
+      bausteine = alt.bausteine.map((b) => {
+        const geaendert = eingang.get(b.id);
+        if (b.gesperrt || !geaendert || geaendert.typ !== b.typ) return b;
+        return { ...geaendert, gesperrt: false };
+      });
+    }
+
+    if (titel === alt.titel && gleich(bausteine, alt.bausteine)) return alt;
+    const zeit = this.#jetzt();
+    this.#db
+      .prepare('UPDATE seite SET titel = ?, slug = ?, bausteine = ?, geaendert_von = ?, geaendert_am = ? WHERE id = ?')
+      .run(titel, slug, JSON.stringify(bausteine), als.name, zeit, alt.id);
+    this.#merke(projekt, als.name, 'seite.gespeichert', `Seite „${titel}“ gespeichert`);
+    return { ...alt, titel, slug, bausteine, geaendertVon: als.name, geaendertAm: zeit };
+  }
+
+  seiteVerschieben(als: Person, seiteId: string, richtung: -1 | 1): void {
+    const { seite, projekt } = this.#seiteMitRecht(als, seiteId, 'seite.aufbau');
+    const neu = verschiebe(this.#seitenLaden(projekt.id), seite.id, richtung);
+    const setzen = this.#db.prepare('UPDATE seite SET position = ? WHERE id = ?');
+    neu.forEach((s, i) => setzen.run(i, s.id));
+  }
+
+  /** Löscht den Entwurf. Was online ist, bleibt online, bis ein neuer Stand freigegeben wird. */
+  seiteLoeschen(als: Person, seiteId: string): void {
+    const { seite, projekt } = this.#seiteMitRecht(als, seiteId, 'seite.aufbau');
+    this.#db.prepare('DELETE FROM seite WHERE id = ?').run(seite.id);
+    this.#merke(projekt, als.name, 'seite.geloescht', `Seite „${seite.titel}“ gelöscht`);
   }
 
   // --- Stände und Freigabe --------------------------------------------------
 
+  /** Friert alle Seiten ein, so wie sie jetzt sind, und erzeugt den Prüf-Link. */
   standEinreichen(als: Person, projektId: string): Stand {
     const projekt = this.#projektMitRecht(als, projektId, 'stand.einreichen');
-    const { entwurf } = this.#seiteLaden(projekt.id);
-    if (!entwurf.ueberschrift) throw new Fehler('Ohne Überschrift lässt sich kein Stand einreichen.');
+    const seiten = this.#seitenLaden(projekt.id);
+    if (!seiten.length) throw new Fehler('Es gibt noch keine Seite, die sich einreichen ließe.');
+    const website: Website = { seiten: seiten.map(alsSeitenStand) };
     this.#db
       .prepare(`UPDATE stand SET zustand = 'ersetzt' WHERE projekt_id = ? AND zustand = 'eingereicht'`)
       .run(projekt.id);
@@ -598,8 +764,8 @@ export class Kern {
         `INSERT INTO stand (id, agentur_id, projekt_id, inhalt, zustand, token, eingereicht_von, eingereicht_am)
          VALUES (?, ?, ?, ?, 'eingereicht', ?, ?, ?)`,
       )
-      .run(id, projekt.agenturId, projekt.id, JSON.stringify(entwurf), randomBytes(24).toString('base64url'), als.name, this.#jetzt());
-    this.#merke(projekt, als.name, 'stand.eingereicht', 'Stand zur Freigabe eingereicht');
+      .run(id, projekt.agenturId, projekt.id, JSON.stringify(website), randomBytes(24).toString('base64url'), als.name, this.#jetzt());
+    this.#merke(projekt, als.name, 'stand.eingereicht', `Stand mit ${seiten.length === 1 ? 'einer Seite' : `${seiten.length} Seiten`} zur Freigabe eingereicht`);
     return alsStand(this.#db.prepare('SELECT * FROM stand WHERE id = ?').get(id) as Zeile);
   }
 
@@ -612,12 +778,12 @@ export class Kern {
   }
 
   /** Der Prüf-Link: Wer das Token kennt, sieht genau diesen Stand, ohne Konto. */
-  standPerToken(token: string): { stand: Stand; projekt: Projekt; veroeffentlicht: Inhalt | null } {
+  standPerToken(token: string): { stand: Stand; projekt: Projekt; veroeffentlicht: Website | null } {
     const z = this.#db.prepare('SELECT * FROM stand WHERE token = ?').get(token) as Zeile | undefined;
     if (!z) throw new NichtGefunden('Dieser Prüf-Link ist nicht gültig.');
     const stand = alsStand(z);
     const projekt = alsProjekt(this.#db.prepare('SELECT * FROM projekt WHERE id = ?').get(stand.projektId) as Zeile);
-    return { stand, projekt, veroeffentlicht: this.#seiteLaden(projekt.id).veroeffentlicht };
+    return { stand, projekt, veroeffentlicht: this.#veroeffentlichteWebsite(projekt.id) };
   }
 
   standEntscheiden(token: string, daten: { freigeben: boolean; name: string; kommentar?: string }): Stand {
@@ -633,7 +799,12 @@ export class Kern {
         .prepare('UPDATE stand SET zustand = ?, entschieden_von = ?, entschieden_am = ?, kommentar = ? WHERE id = ?')
         .run(daten.freigeben ? 'freigegeben' : 'abgelehnt', name, zeit, kommentar, stand.id);
       if (daten.freigeben) {
-        this.#db.prepare('UPDATE seite SET veroeffentlicht = ? WHERE projekt_id = ?').run(JSON.stringify(stand.inhalt), projekt.id);
+        this.#db
+          .prepare(
+            `INSERT INTO veroeffentlichung (projekt_id, agentur_id, website, stand_id, veroeffentlicht_am) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (projekt_id) DO UPDATE SET website = excluded.website, stand_id = excluded.stand_id, veroeffentlicht_am = excluded.veroeffentlicht_am`,
+          )
+          .run(projekt.id, projekt.agenturId, JSON.stringify(stand.inhalt), stand.id, zeit);
       }
       this.#db.exec('COMMIT');
     } catch (fehler) {
@@ -649,24 +820,29 @@ export class Kern {
     return this.standPerToken(token).stand;
   }
 
-  bildZumStand(token: string): { medium: Medium; daten: Buffer } | null {
+  bildZumStand(token: string, mediumId: string): { medium: Medium; daten: Buffer } | null {
     const { stand } = this.standPerToken(token);
-    return this.#bildZuInhalt(stand.projektId, stand.inhalt);
+    return this.#bildAusWebsite(stand.projektId, stand.inhalt, mediumId);
   }
 
-  // --- Veröffentlichte Seite ------------------------------------------------
+  // --- Veröffentlichte Website ----------------------------------------------
 
-  veroeffentlicht(slug: string): { projekt: Projekt; inhalt: Inhalt } | null {
-    const z = this.#db.prepare('SELECT * FROM projekt WHERE slug = ?').get(slug) as Zeile | undefined;
+  #veroeffentlichteWebsite(projektId: string): Website | null {
+    const z = this.#db.prepare('SELECT website FROM veroeffentlichung WHERE projekt_id = ?').get(projektId) as Zeile | undefined;
+    return z ? websiteAus(String(z.website), projektId) : null;
+  }
+
+  veroeffentlicht(projektSlug: string): { projekt: Projekt; website: Website } | null {
+    const z = this.#db.prepare('SELECT * FROM projekt WHERE slug = ?').get(projektSlug) as Zeile | undefined;
     if (!z) return null;
     const projekt = alsProjekt(z);
-    const inhalt = this.#seiteLaden(projekt.id).veroeffentlicht;
-    return inhalt ? { projekt, inhalt } : null;
+    const website = this.#veroeffentlichteWebsite(projekt.id);
+    return website && website.seiten.length ? { projekt, website } : null;
   }
 
-  bildVeroeffentlicht(slug: string): { medium: Medium; daten: Buffer } | null {
-    const seite = this.veroeffentlicht(slug);
-    return seite ? this.#bildZuInhalt(seite.projekt.id, seite.inhalt) : null;
+  bildVeroeffentlicht(projektSlug: string, mediumId: string): { medium: Medium; daten: Buffer } | null {
+    const online = this.veroeffentlicht(projektSlug);
+    return online ? this.#bildAusWebsite(online.projekt.id, online.website, mediumId) : null;
   }
 
   // --- Verlauf --------------------------------------------------------------
