@@ -15,6 +15,11 @@ export interface Einstellungen {
   /** Adresse, unter der das Werkzeug erreichbar ist, etwa `https://tool.agentur.de`. Links in Mails bauen darauf auf. */
   basisUrl: string;
   post: Post;
+  /**
+   * Arbeit auf dem eigenen Rechner: Einrichten im Browser und Anmelden per Klick, ohne Mail.
+   * Gilt nur für Anfragen, die von diesem Rechner an localhost gehen.
+   */
+  lokal?: boolean;
 }
 
 const WEB = join(dirname(fileURLToPath(import.meta.url)), 'web');
@@ -86,6 +91,13 @@ function sitzungAusCookie(req: IncomingMessage, sicher: boolean): string | null 
     if (name === cookieName(sicher) && /^[A-Za-z0-9_-]{43}$/.test(wert.join('='))) return wert.join('=');
   }
   return null;
+}
+
+/** Kommt die Anfrage von diesem Rechner und ist an localhost gerichtet? Über einen Proxy aus dem Netz nie. */
+function vonDiesemRechner(req: IncomingMessage): boolean {
+  const absender = req.socket.remoteAddress ?? '';
+  const host = (req.headers.host ?? '').replace(/:\d+$/, '');
+  return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(absender) && ['localhost', '127.0.0.1', '[::1]'].includes(host);
 }
 
 function sitzungsCookie(wert: string, sicher: boolean, sekunden: number): string {
@@ -312,6 +324,33 @@ function seiteAnmelden(): string {
 </div>`;
 }
 
+function seiteLokalEinrichten(): string {
+  return `<div class="schmal">
+<h1>Agentur einrichten</h1>
+<p>Das Werkzeug läuft auf diesem Rechner. Leg die Agentur und dich als Leitung an, weitere Personen kommen danach unter „Team“ dazu.</p>
+<form method="post" action="/lokal/einrichten" class="felder">
+<label for="agentur">Name der Agentur</label><input id="agentur" name="agentur" required maxlength="120" autofocus>
+<label for="name">Dein Name</label><input id="name" name="name" required maxlength="80" autocomplete="name">
+<label for="email">Deine Mail-Adresse</label><input id="email" name="email" type="email" required maxlength="254" autocomplete="email">
+<button type="submit">Einrichten</button>
+</form>
+<p class="leer">Die Mail-Adresse braucht es erst, wenn das Werkzeug im Netz läuft. Dann kommt der Anmelde-Link dorthin.</p>
+</div>`;
+}
+
+function seiteLokalAnmelden(personen: Person[]): string {
+  return `<div class="schmal">
+<h1>Anmelden</h1>
+<p>Auf diesem Rechner geht es ohne Mail: einfach die Person wählen. So lässt sich auch ausprobieren, was Mitarbeit oder Kund:innen sehen.</p>
+<ul class="team">${personen
+    .map(
+      (p) => `<li><div><strong>${esc(p.name)}</strong><small>${ROLLEN_NAME[p.rolle]}</small></div>
+<form method="post" action="/lokal/anmelden"><input type="hidden" name="person" value="${esc(p.id)}"><button type="submit">Anmelden</button></form></li>`,
+    )
+    .join('')}</ul>
+</div>`;
+}
+
 function seiteLinkUnterwegs(): string {
   return `<div class="schmal">
 <h1>Schau in dein Postfach</h1>
@@ -433,8 +472,31 @@ async function bearbeite(kern: Kern, e: Einstellungen, req: IncomingMessage, res
   const sitzung = sitzungAusCookie(req, sicher);
   const person = sitzung ? kern.sitzungPerson(sitzung) : null;
 
+  // Auf dem eigenen Rechner: einrichten und anmelden ohne Mail.
+  const lokal = Boolean(e.lokal) && vonDiesemRechner(req);
+  if (pfad.startsWith('/lokal/')) {
+    if (!lokal || req.method !== 'POST') throw new NichtGefunden('Diese Adresse gibt es nicht.');
+    const felder = await formular(req);
+    let neu: string;
+    if (pfad === '/lokal/einrichten') {
+      if (kern.agenturen().length) throw new Fehler('Die Agentur ist schon eingerichtet.');
+      const agentur = kern.agenturAnlegen(felder.get('agentur') ?? '');
+      const leitung = kern.erstePersonAnlegen(agentur.id, { name: felder.get('name') ?? '', email: felder.get('email') ?? '' });
+      neu = kern.sitzungOhneLink(leitung.id).sitzung;
+    } else if (pfad === '/lokal/anmelden') {
+      neu = kern.sitzungOhneLink(felder.get('person') ?? '').sitzung;
+    } else {
+      throw new NichtGefunden('Diese Adresse gibt es nicht.');
+    }
+    return umleiten(res, '/', sitzungsCookie(neu, sicher, SITZUNG_GUELTIG_TAGE * 24 * 60 * 60));
+  }
+
   if (pfad === '/anmelden') {
     if (person) return umleiten(res, '/');
+    if (liest && lokal) {
+      const personen = kern.anmeldbarePersonen();
+      return sendeHtml(res, 200, rahmen('Anmelden', personen.length ? seiteLokalAnmelden(personen) : seiteLokalEinrichten()));
+    }
     if (req.method === 'POST') {
       const treffer = kern.anmeldungAnfordern((await formular(req)).get('email') ?? '');
       if (treffer) {
@@ -610,13 +672,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
   const smtp = smtpAusUmgebung(process.env);
   if (!smtp && !entwicklung) beenden('Ohne SMTP_HOST gehen keine Anmelde-Mails raus. Die Einstellungen stehen in der README.');
-  if (!smtp) console.log('Kein Mailserver eingestellt: Anmelde-Links erscheinen hier im Protokoll.');
 
   const kern = new Kern(process.env.DATEN ?? join(process.cwd(), 'daten'));
-  if (!kern.agenturen().length) {
+  if (!kern.agenturen().length && !entwicklung) {
     console.log('Noch keine Agentur eingerichtet. Zuerst: npm run einrichten -- --agentur "Name" --name "Dein Name" --email "du@agentur.de"');
   }
-  erstelleServer(kern, { basisUrl, post: smtp ?? new Protokollpost() }).listen(port, host, () => {
-    console.log(`Agenturtool läuft auf ${basisUrl} (lauscht auf ${host}:${port})`);
+  // Ohne Mailserver auf localhost: Einrichten und Anmelden gehen direkt im Browser.
+  const lokal = entwicklung && !smtp;
+  erstelleServer(kern, { basisUrl, post: smtp ?? new Protokollpost(), lokal }).listen(port, host, () => {
+    console.log(`Agenturtool läuft auf ${basisUrl}${lokal ? ' (lokal: Anmelden per Klick, ohne Mail)' : ''}`);
   });
 }

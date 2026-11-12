@@ -4,6 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import { request } from 'node:http';
 import type { Server } from 'node:http';
 import { Kern } from '../src/kern/kern.ts';
 import { erstelleServer } from '../src/server.ts';
@@ -216,4 +217,41 @@ test('Unter HTTPS heißt das Cookie __Host-sitzung und ist als Secure markiert',
   } finally {
     sicher.close();
   }
+});
+
+test('Lokal: Einrichten im Browser und Anmelden per Klick, aber nur auf diesem Rechner', async () => {
+  const kern = new Kern(mkdtempSync(join(tmpdir(), 'lokal-')));
+  const lokal = erstelleServer(kern, { basisUrl: 'http://localhost:3000', post: new Sammelpost(), lokal: true });
+  const ziel = (await starte(lokal)).replace('127.0.0.1', 'localhost');
+  try {
+    const leer = await (await fetch(`${ziel}/anmelden`)).text();
+    assert.ok(leer.includes('Agentur einrichten'));
+    const eingerichtet = await sende('/lokal/einrichten', { agentur: 'Studio <A>', name: 'Tim', email: 'tim@agentur.test' }, '', ziel);
+    assert.equal(eingerichtet.status, 303);
+    const cookie = (eingerichtet.headers.get('set-cookie') ?? '').split(';')[0];
+    assert.equal((await fetch(`${ziel}/`, { headers: { cookie }, redirect: 'manual' })).status, 200);
+    assert.equal((await sende('/lokal/einrichten', { agentur: 'B', name: 'X', email: 'x@agentur.test' }, '', ziel)).status, 400);
+
+    const auswahl = await (await fetch(`${ziel}/anmelden`)).text();
+    const personId = /name="person" value="([0-9a-f-]{36})"/.exec(auswahl)?.[1] ?? '';
+    assert.ok(auswahl.includes('Tim') && personId);
+    assert.equal((await sende('/lokal/anmelden', { person: personId }, '', ziel)).status, 303);
+
+    // Über einen Proxy mit fremdem Namen kommt der lokale Weg nicht an.
+    const ueberProxy = await new Promise<{ status: number; text: string }>((fertig, scheitern) => {
+      const anfrage = request(`${ziel}/anmelden`, { headers: { host: 'tool.agentur.test' } }, (antwort) => {
+        let text = '';
+        antwort.on('data', (teil: Buffer) => (text += teil.toString()));
+        antwort.on('end', () => fertig({ status: antwort.statusCode ?? 0, text }));
+      });
+      anfrage.on('error', scheitern);
+      anfrage.end();
+    });
+    assert.equal(ueberProxy.status, 200);
+    assert.ok(ueberProxy.text.includes('Link schicken') && !ueberProxy.text.includes('name="person"'));
+  } finally {
+    lokal.close();
+  }
+  // Ohne lokalen Modus gibt es den Weg gar nicht.
+  assert.equal((await sende('/lokal/anmelden', { person: '00000000-0000-0000-0000-000000000000' })).status, 404);
 });

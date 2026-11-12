@@ -32,15 +32,19 @@ Stand: **Etappe 1** mit Anmeldung per Mail-Link. Der Kern und einmal der ganze A
 Braucht Node.js ab Version 22.18, sonst nichts. Es gibt keine Abhängigkeiten.
 
 ```
-npm run einrichten -- --agentur "Name der Agentur" --name "Dein Name" --email "du@agentur.de"
 npm start
 ```
 
-Dann http://localhost:3000 öffnen und mit der Adresse anmelden. Ohne Mailserver erscheint
-der Anmelde-Link im Terminal, in dem der Server läuft.
+Dann http://localhost:3000 öffnen. Beim ersten Mal richtest du dort die Agentur ein, danach
+meldest du dich per Klick als eine der Personen an. Über „Abmelden“ kommst du zurück zur Auswahl
+und kannst so ausprobieren, was Mitarbeit oder Kund:innen sehen.
 
-Daten liegen im Ordner `daten/`. Die Einrichtung geht absichtlich nur über die Kommandozeile:
-So kann sich niemand zur Leitung machen, der die Adresse im Netz zuerst findet.
+Dieser **lokale Modus** gilt nur, solange kein Mailserver eingestellt ist und die Anfrage von
+diesem Rechner an `localhost` geht. Im Netz läuft die Anmeldung immer über den Link per Mail,
+und die Einrichtung geht dort nur über die Kommandozeile (`npm run einrichten`), damit sich niemand
+zur Leitung macht, der die Adresse zuerst findet.
+
+Daten liegen im Ordner `daten/`.
 
 ## Einstellungen
 

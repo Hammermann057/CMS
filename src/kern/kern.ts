@@ -366,6 +366,25 @@ export class Kern {
     return z ? alsPerson(z) : null;
   }
 
+  /**
+   * Nur für die Arbeit auf dem eigenen Rechner: Sitzung ohne Mail-Link.
+   * Der Server bietet das nur an, wenn kein Mailserver eingestellt ist und die Anfrage von diesem Rechner kommt.
+   */
+  sitzungOhneLink(personId: string): { sitzung: string; person: Person } {
+    const z = this.#db.prepare('SELECT * FROM person WHERE id = ? AND aktiv = 1').get(personId) as Zeile | undefined;
+    if (!z) throw new NichtGefunden('Person nicht gefunden.');
+    const sitzung = zufall();
+    this.#db
+      .prepare('INSERT INTO sitzung (id_hash, person_id, angelegt_am, gueltig_bis) VALUES (?, ?, ?, ?)')
+      .run(pruefsummeVon(sitzung), personId, this.#jetzt(), this.#jetzt(SITZUNG_GUELTIG_TAGE * 24 * 60 * 60 * 1000));
+    return { sitzung, person: alsPerson(z) };
+  }
+
+  /** Nur für die Arbeit auf dem eigenen Rechner: alle, als die man sich dort per Klick anmelden kann. */
+  anmeldbarePersonen(): Person[] {
+    return (this.#db.prepare('SELECT * FROM person WHERE aktiv = 1 ORDER BY rowid').all() as Zeile[]).map(alsPerson);
+  }
+
   abmelden(sitzung: string): void {
     this.#db.prepare('DELETE FROM sitzung WHERE id_hash = ?').run(pruefsummeVon(sitzung));
   }
