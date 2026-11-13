@@ -145,6 +145,31 @@ export interface SeitenStand {
 /** Alle Seiten eines Projekts zu einem Zeitpunkt. Die erste ist die Startseite. */
 export interface Website {
   seiten: SeitenStand[];
+  /** Fehlt bei Ständen von vor dem Regelwerk. Dann gilt das Standard-Regelwerk. */
+  regelwerk?: Regelwerk;
+}
+
+// --- Regelwerk ----------------------------------------------------------------
+
+export type SchriftId = 'system' | 'grotesk' | 'humanistisch' | 'serif' | 'antiqua' | 'mono';
+
+/**
+ * Gestaltung der Website eines Projekts. Farben als #rrggbb, Maße in Pixeln.
+ * Die Agentur legt es fest, Kund:innen sehen es nur.
+ */
+export interface Regelwerk {
+  hintergrund: string;
+  text: string;
+  leise: string;
+  akzent: string;
+  akzentText: string;
+  schriftText: SchriftId;
+  schriftUeberschrift: SchriftId;
+  groesseText: number;
+  groesseUeberschrift: number;
+  radius: number;
+  abstand: number;
+  breite: number;
 }
 
 export type StandZustand = 'eingereicht' | 'freigegeben' | 'abgelehnt' | 'ersetzt';
@@ -180,4 +205,6 @@ export interface Hinweis {
   ausweg: string;
   /** Der Baustein, an dem der Hinweis hängt. `null` gilt für die ganze Seite. */
   bausteinId: string | null;
+  /** Ein Ausweg, den das Werkzeug mit einem Klick umsetzen kann, etwa eine Farbe mit genug Kontrast. */
+  loesung?: { feld: keyof Regelwerk; wert: string };
 }

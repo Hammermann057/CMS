@@ -2,7 +2,8 @@
 // Ohne JavaScript benutzbar: Ein Formular trägt alle Bausteine, jeder Knopf speichert mit
 // und führt danach seine Aktion aus. So geht beim Verschieben nichts Getipptes verloren.
 import { BAUSTEIN_NAMEN, BAUSTEIN_TYPEN, gleich, neuerBaustein, verschiebe } from '../kern/bausteine.ts';
-import { hinweiseSeite } from '../kern/pruefer.ts';
+import { hinweiseRegelwerk, hinweiseSeite } from '../kern/pruefer.ts';
+import { STANDARD_REGELWERK, unterschiede } from '../kern/regelwerk.ts';
 import { darf } from '../kern/rechte.ts';
 import { esc, renderSeitenInhalt } from '../renderer/seite.ts';
 import type { BildUrl } from '../renderer/seite.ts';
@@ -193,7 +194,7 @@ ${neu}
 <span>Zuletzt gespeichert von ${esc(seite.geaendertVon)}, ${zeit(seite.geaendertAm)}</span></div>
 </form>
 <aside class="editor-vorschau" aria-labelledby="vorschau-titel"><h2 id="vorschau-titel">Vorschau</h2>
-<p class="leer">So sieht die Seite nach dem Speichern aus. Leere Bausteine fehlen hier mit Absicht.</p>
+<p class="leer">So sieht die Seite nach dem Speichern aus, mit Farben und Schriften aus dem <a href="/projekte/${esc(projekt.id)}/regelwerk">Regelwerk</a>. Leere Bausteine fehlen hier mit Absicht.</p>
 <div class="vorschau" data-vorschau>${renderSeitenInhalt(seite, (id) => `/medien/${id}`, true)}</div></aside>
 </div>
 ${loeschen}`;
@@ -275,6 +276,8 @@ export function seitePruefen(daten: { stand: Stand; projekt: Projekt; veroeffent
   const neuBild: BildUrl = (id) => `/pruefen/${token}/bilder/${id}`;
   const altBild: BildUrl = (id) => `/seiten/${projekt.slug}/_bilder/${id}`;
   const { seiten, entfallen } = vergleiche(stand.inhalt, veroeffentlicht);
+  const regelwerkNeu = stand.inhalt.regelwerk ?? STANDARD_REGELWERK;
+  const gestaltung = veroeffentlicht ? unterschiede(veroeffentlicht.regelwerk ?? STANDARD_REGELWERK, regelwerkNeu) : [];
   const geaendert = seiten.filter((v) => v.art !== 'gleich');
   const gleichGeblieben = seiten.filter((v) => v.art === 'gleich');
   const ARTEN = { neu: 'Neue Seite', geaendert: 'Geändert', gleich: '' };
@@ -284,14 +287,15 @@ export function seitePruefen(daten: { stand: Stand; projekt: Projekt; veroeffent
     geaendert.filter((v) => v.art === 'neu').length ? anzahl(geaendert.filter((v) => v.art === 'neu').length, 'Seite neu', 'Seiten neu') : '',
     entfallen.length ? anzahl(entfallen.length, 'Seite entfällt', 'Seiten entfallen') : '',
     gleichGeblieben.length ? anzahl(gleichGeblieben.length, 'Seite unverändert', 'Seiten unverändert') : '',
+    gestaltung.length ? 'Gestaltung geändert' : '',
   ].filter(Boolean);
 
   const abschnitte = geaendert
     .map(
       (v) => `<section class="pruef-seite"><h2>${esc(v.seite.titel)} <span class="marke-neu">${ARTEN[v.art]}</span></h2>
 <div class="vergleich">
-<div><h3>Bisher online</h3><div class="vorschau">${v.bisher ? renderSeitenInhalt(v.bisher, altBild) : '<p class="leer">Diese Seite gibt es online noch nicht.</p>'}</div></div>
-<div><h3>Neuer Stand</h3><div class="vorschau">${renderSeitenInhalt(v.seite, neuBild)}</div></div>
+<div><h3>Bisher online</h3><div class="vorschau" data-regelwerk="online">${v.bisher ? renderSeitenInhalt(v.bisher, altBild) : '<p class="leer">Diese Seite gibt es online noch nicht.</p>'}</div></div>
+<div><h3>Neuer Stand</h3><div class="vorschau" data-regelwerk="neu">${renderSeitenInhalt(v.seite, neuBild)}</div></div>
 </div>${teilHinweise(hinweiseSeite(v.seite))}</section>`,
     )
     .join('');
@@ -305,7 +309,15 @@ export function seitePruefen(daten: { stand: Stand; projekt: Projekt; veroeffent
         .map((v) => `<li>${esc(v.seite.titel)}</li>`)
         .join('')}</ul></details>`
     : '';
-  const nichts = !geaendert.length && !entfallen.length ? '<p class="leer">Dieser Stand entspricht der Website, die schon online ist.</p>' : '';
+  const gestaltungHtml = gestaltung.length
+    ? `<section><h2>Gestaltung <span class="marke-neu">Geändert</span></h2>
+<p>Das Regelwerk gilt für alle Seiten, auch für die unveränderten.</p>
+<table class="tabelle"><thead><tr><th scope="col">Was</th><th scope="col">Bisher</th><th scope="col">Neu</th></tr></thead><tbody>${gestaltung
+        .map((u) => `<tr><th scope="row">${esc(u.feld.name)}</th><td>${esc(u.vorher)}</td><td>${esc(u.nachher)}</td></tr>`)
+        .join('')}</tbody></table>${teilHinweise(hinweiseRegelwerk(regelwerkNeu))}</section>`
+    : '';
+  const nichts =
+    !geaendert.length && !entfallen.length && !gestaltung.length ? '<p class="leer">Dieser Stand entspricht der Website, die schon online ist.</p>' : '';
 
   let entscheidung = '';
   if (stand.zustand === 'eingereicht') {
@@ -328,6 +340,6 @@ export function seitePruefen(daten: { stand: Stand; projekt: Projekt; veroeffent
 
   return `<h1>Stand zur Freigabe: ${esc(projekt.name)}</h1>
 <p class="unterzeile">Eingereicht von ${esc(stand.eingereichtVon)} am ${zeit(stand.eingereichtAm)}${zusammenfassung.length ? ` · ${zusammenfassung.join(' · ')}` : ''}</p>
-${nichts}${abschnitte}${weg}${unveraendert}
+${nichts}${gestaltungHtml}${abschnitte}${weg}${unveraendert}
 <section><h2>Entscheidung</h2>${entscheidung}</section>`;
 }

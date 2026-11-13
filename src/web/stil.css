@@ -204,3 +204,20 @@ code { font-family: ui-monospace, monospace; font-size: 0.9em; overflow-wrap: an
    und ragen auf dem Handy über den Rand. */
 .felder, .editor-formular, .bausteine, .neu-baustein, .galerie-liste { grid-template-columns: minmax(0, 1fr); }
 select { max-width: 100%; }
+
+/* --- Regelwerk --------------------------------------------------------------- */
+.regelwerk-formular fieldset { margin: 0; padding: 16px; min-width: 0; background: var(--flaeche); border: 1px solid var(--linie); border-radius: 8px; }
+.regelwerk-formular legend { padding: 0 6px; font-weight: 700; }
+.farbwahl { display: flex; gap: 8px; align-items: center; }
+.farbwahl input[type='color'] { flex: none; width: 52px; min-height: 44px; padding: 2px; cursor: pointer; }
+.farbwahl input:not([type='color']) { font-family: ui-monospace, monospace; }
+.zahl-mit-einheit { display: flex; align-items: center; gap: 8px; }
+.zahl-mit-einheit input { max-width: 140px; }
+small.reicht { color: #1d6b36; }
+small.reicht-nicht { color: var(--warnung); font-weight: 600; }
+.hinweise form { margin-top: 8px; }
+.meldung { border-color: var(--signal); }
+.meldung ul { margin: 0; }
+.tabelle { width: 100%; border-collapse: collapse; font-size: 15px; }
+.tabelle th, .tabelle td { padding: 8px; text-align: left; border-top: 1px solid var(--linie); overflow-wrap: anywhere; }
+.tabelle thead th { border-top: 0; color: var(--leise); }

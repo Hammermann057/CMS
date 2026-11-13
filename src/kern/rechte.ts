@@ -8,6 +8,7 @@ export type Aktion =
   | 'medium.hochladen'
   | 'seite.aufbau'
   | 'seite.inhalt'
+  | 'regelwerk.bearbeiten'
   | 'stand.einreichen';
 
 const ERLAUBT: Record<Rolle, readonly Aktion[]> = {
@@ -19,9 +20,10 @@ const ERLAUBT: Record<Rolle, readonly Aktion[]> = {
     'medium.hochladen',
     'seite.aufbau',
     'seite.inhalt',
+    'regelwerk.bearbeiten',
     'stand.einreichen',
   ],
-  mitarbeit: ['team.ansehen', 'projekt.anlegen', 'projekt.ansehen', 'medium.hochladen', 'seite.aufbau', 'seite.inhalt', 'stand.einreichen'],
+  mitarbeit: ['team.ansehen', 'projekt.anlegen', 'projekt.ansehen', 'medium.hochladen', 'seite.aufbau', 'seite.inhalt', 'regelwerk.bearbeiten', 'stand.einreichen'],
   // Kund:innen liefern Material und füllen Bausteine, die die Agentur nicht gesperrt hat.
   // Aufbau und Reihenfolge legt die Agentur fest. Freigeben geht über den Prüf-Link, ohne Konto.
   kundin: ['projekt.ansehen', 'medium.hochladen', 'seite.inhalt'],

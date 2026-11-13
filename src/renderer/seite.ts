@@ -1,7 +1,8 @@
 // Macht aus Bausteinen HTML. Vorschau im Editor, Prüf-Link und ausgelieferte Website
 // nutzen denselben Weg, damit freigegeben wird, was später online steht.
 import { istLeer, zielAus } from '../kern/bausteine.ts';
-import type { Baustein, SeitenStand, Website } from '../kern/typen.ts';
+import { schriftCss } from '../kern/regelwerk.ts';
+import type { Baustein, Regelwerk, SeitenStand, Website } from '../kern/typen.ts';
 
 export function esc(text: unknown): string {
   return String(text ?? '')
@@ -77,7 +78,7 @@ export function renderSeitenInhalt(seite: Pick<SeitenStand, 'bausteine'>, bildUr
 export function renderWebsite(
   website: Website,
   seite: SeitenStand,
-  optionen: { projektName: string; bildUrl: BildUrl; seitenUrl: (s: SeitenStand, index: number) => string },
+  optionen: { projektName: string; bildUrl: BildUrl; seitenUrl: (s: SeitenStand, index: number) => string; regelwerkUrl: string },
 ): string {
   const kopf = seite.bausteine.find((b) => b.typ === 'kopf' && b.ueberschrift);
   const ueberschrift = kopf?.typ === 'kopf' ? kopf.ueberschrift : seite.titel;
@@ -98,10 +99,19 @@ export function renderWebsite(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(titel)}</title>
 <link rel="stylesheet" href="/seite.css">
+<link rel="stylesheet" href="${esc(optionen.regelwerkUrl)}">
 </head>
 <body class="oeffentlich">
 ${navigation}
 <main>${renderSeitenInhalt(seite, optionen.bildUrl)}</main>
 </body>
 </html>`;
+}
+
+/**
+ * Das Regelwerk als CSS-Variablen für einen Selektor. Die Werte sind geprüft:
+ * Farben als #rrggbb, Zahlen, Schriften nur aus der festen Liste.
+ */
+export function regelwerkCss(r: Regelwerk, selektor: string): string {
+  return `${selektor}{--r-hintergrund:${r.hintergrund};--r-text:${r.text};--r-leise:${r.leise};--r-akzent:${r.akzent};--r-akzent-text:${r.akzentText};--r-schrift-text:${schriftCss(r.schriftText)};--r-schrift-ueberschrift:${schriftCss(r.schriftUeberschrift)};--r-groesse-text:${r.groesseText}px;--r-groesse-ueberschrift:${r.groesseUeberschrift}px;--r-radius:${r.radius}px;--r-abstand:${r.abstand}px;--r-breite:${r.breite}px}\n`;
 }

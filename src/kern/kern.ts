@@ -6,6 +6,7 @@ import { darf, Verboten } from './rechte.ts';
 import type { Aktion } from './rechte.ts';
 import { Fehler, NichtGefunden } from './fehler.ts';
 import { bereinige, bilderIn, gleich, MAX_BAUSTEINE, neuerBaustein, verschiebe } from './bausteine.ts';
+import { bereinigeRegelwerk, STANDARD_REGELWERK, unterschiede } from './regelwerk.ts';
 import type {
   Agentur,
   Baustein,
@@ -14,6 +15,7 @@ import type {
   Person,
   Projekt,
   ProjektUebersicht,
+  Regelwerk,
   Rolle,
   Seite,
   SeitenStand,
@@ -56,6 +58,10 @@ CREATE TABLE IF NOT EXISTS seite (
   slug TEXT NOT NULL, titel TEXT NOT NULL, position INTEGER NOT NULL, bausteine TEXT NOT NULL,
   geaendert_von TEXT NOT NULL, geaendert_am TEXT NOT NULL,
   UNIQUE (projekt_id, slug)
+);
+CREATE TABLE IF NOT EXISTS regelwerk (
+  projekt_id TEXT PRIMARY KEY REFERENCES projekt(id), agentur_id TEXT NOT NULL,
+  werte TEXT NOT NULL, geaendert_von TEXT NOT NULL, geaendert_am TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS veroeffentlichung (
   projekt_id TEXT PRIMARY KEY REFERENCES projekt(id), agentur_id TEXT NOT NULL,
@@ -747,6 +753,37 @@ export class Kern {
     this.#merke(projekt, als.name, 'seite.geloescht', `Seite „${seite.titel}“ gelöscht`);
   }
 
+  // --- Regelwerk -------------------------------------------------------------
+
+  /** Das Regelwerk des Projekts. Solange niemand etwas festgelegt hat, gilt das Standard-Regelwerk. */
+  regelwerk(als: Person, projektId: string): Regelwerk {
+    const projekt = this.#projektMitRecht(als, projektId, 'projekt.ansehen');
+    return this.#regelwerkLaden(projekt.id);
+  }
+
+  #regelwerkLaden(projektId: string): Regelwerk {
+    const z = this.#db.prepare('SELECT werte FROM regelwerk WHERE projekt_id = ?').get(projektId) as Zeile | undefined;
+    // Neue Felder späterer Versionen bekommen so ihren Standardwert.
+    return z ? bereinigeRegelwerk(JSON.parse(String(z.werte)), STANDARD_REGELWERK) : STANDARD_REGELWERK;
+  }
+
+  /** Speichert Änderungen am Regelwerk. Online geht es erst mit dem nächsten freigegebenen Stand. */
+  regelwerkSpeichern(als: Person, projektId: string, eingabe: unknown): Regelwerk {
+    const projekt = this.#projektMitRecht(als, projektId, 'regelwerk.bearbeiten');
+    const alt = this.#regelwerkLaden(projekt.id);
+    const neu = bereinigeRegelwerk(eingabe, alt);
+    const geaendert = unterschiede(alt, neu);
+    if (!geaendert.length) return alt;
+    this.#db
+      .prepare(
+        `INSERT INTO regelwerk (projekt_id, agentur_id, werte, geaendert_von, geaendert_am) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (projekt_id) DO UPDATE SET werte = excluded.werte, geaendert_von = excluded.geaendert_von, geaendert_am = excluded.geaendert_am`,
+      )
+      .run(projekt.id, projekt.agenturId, JSON.stringify(neu), als.name, this.#jetzt());
+    this.#merke(projekt, als.name, 'regelwerk.gespeichert', `Regelwerk geändert: ${geaendert.map((u) => u.feld.name).join(', ')}`);
+    return neu;
+  }
+
   // --- Stände und Freigabe --------------------------------------------------
 
   /** Friert alle Seiten ein, so wie sie jetzt sind, und erzeugt den Prüf-Link. */
@@ -754,7 +791,7 @@ export class Kern {
     const projekt = this.#projektMitRecht(als, projektId, 'stand.einreichen');
     const seiten = this.#seitenLaden(projekt.id);
     if (!seiten.length) throw new Fehler('Es gibt noch keine Seite, die sich einreichen ließe.');
-    const website: Website = { seiten: seiten.map(alsSeitenStand) };
+    const website: Website = { seiten: seiten.map(alsSeitenStand), regelwerk: this.#regelwerkLaden(projekt.id) };
     this.#db
       .prepare(`UPDATE stand SET zustand = 'ersetzt' WHERE projekt_id = ? AND zustand = 'eingereicht'`)
       .run(projekt.id);

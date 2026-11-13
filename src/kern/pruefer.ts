@@ -2,7 +2,8 @@
 // und was man tun kann. Er sperrt nichts: Entscheiden tun Menschen.
 // Später kommen die Regeln aus dem Regelwerk der Agentur (Tokens, Marke, Tonalität).
 import { istLeer, BAUSTEIN_NAMEN } from './bausteine.ts';
-import type { Baustein, Hinweis } from './typen.ts';
+import { kontrast, kontrastText, KONTRAST_BEDIENELEMENT, KONTRAST_TEXT, vorschlag } from './farbe.ts';
+import type { Baustein, Hinweis, Regelwerk } from './typen.ts';
 
 export const MAX_UEBERSCHRIFT = 60;
 export const MAX_TEXT_OHNE_ZWISCHENTITEL = 1200;
@@ -120,5 +121,60 @@ export function hinweiseSeite(seite: { titel: string; bausteine: readonly Bauste
         break;
     }
   });
+  return liste;
+}
+
+/** Regeln zum Regelwerk selbst. Jeder Hinweis bringt eine Farbe mit, die genügt und dem Original am nächsten liegt. */
+export function hinweiseRegelwerk(r: Regelwerk): Hinweis[] {
+  const liste: Hinweis[] = [];
+  const pruefe = (
+    feld: 'text' | 'leise' | 'akzentText' | 'akzent',
+    gegen: string,
+    ziel: number,
+    texte: { regel: string; was: string; grund: string },
+  ): void => {
+    const wert = kontrast(r[feld], gegen);
+    if (wert >= ziel) return;
+    const neu = vorschlag(r[feld], gegen, ziel);
+    liste.push({
+      regel: texte.regel,
+      folge: `${texte.was} hat nur einen Kontrast von ${kontrastText(wert)}. In der Sonne auf dem Handy oder mit schwächeren Augen ist das schwer zu erkennen.`,
+      grund: texte.grund,
+      ausweg: `${neu} nehmen: derselbe Farbton, ${kontrastText(kontrast(neu, gegen))}.`,
+      bausteinId: null,
+      loesung: { feld, wert: neu },
+    });
+  };
+  pruefe('text', r.hintergrund, KONTRAST_TEXT, {
+    regel: 'Kontrast Text',
+    was: 'Text auf dem Hintergrund',
+    grund: 'Für Fließtext gelten mindestens 4,5 : 1 (WCAG 2.2, Stufe AA).',
+  });
+  pruefe('leise', r.hintergrund, KONTRAST_TEXT, {
+    regel: 'Kontrast leiser Text',
+    was: 'Leiser Text, etwa Bildunterschriften,',
+    grund: 'Auch kleine Nebentexte brauchen 4,5 : 1 (WCAG 2.2, Stufe AA).',
+  });
+  // Erst die Knopffarbe, dann die Schrift darauf: So baut der zweite Vorschlag auf dem ersten auf.
+  pruefe('akzent', r.hintergrund, KONTRAST_BEDIENELEMENT, {
+    regel: 'Knopf vor Hintergrund',
+    was: 'Der Knopf vor dem Hintergrund',
+    grund: 'Bedienelemente brauchen mindestens 3 : 1 zu ihrer Umgebung, damit man sie als solche erkennt (WCAG 2.2, 1.4.11).',
+  });
+  pruefe('akzentText', r.akzent, KONTRAST_TEXT, {
+    regel: 'Kontrast Knopf',
+    was: 'Die Beschriftung auf dem Knopf',
+    grund: 'Knopfbeschriftungen sind Text und brauchen 4,5 : 1 (WCAG 2.2, Stufe AA).',
+  });
+  if (r.groesseText < 16) {
+    liste.push({
+      regel: 'Textgröße',
+      folge: `Fließtext mit ${r.groesseText} Pixeln ist auf dem Handy mühsam zu lesen.`,
+      grund: 'Browser setzen 16 Pixel als Grundgröße. Darunter wirkt Text schnell gedrängt.',
+      ausweg: 'Mindestens 16 Pixel wählen.',
+      bausteinId: null,
+      loesung: { feld: 'groesseText', wert: '16' },
+    });
+  }
   return liste;
 }

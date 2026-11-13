@@ -418,8 +418,9 @@ test('Renderer maskiert alle Eingaben, lässt Leeres weg und baut keine gefährl
       { id: 's2', slug: 'karte', titel: 'Karte & Preise', bausteine: [baustein('kopf', { ueberschrift: 'Unsere Karte' })] },
     ],
   };
-  const seite2 = renderWebsite(website, website.seiten[1], { projektName: 'Café', bildUrl: (id) => id, seitenUrl: (s, i) => (i === 0 ? '/' : `/${s.slug}`) });
+  const seite2 = renderWebsite(website, website.seiten[1], { projektName: 'Café', bildUrl: (id) => id, seitenUrl: (s, i) => (i === 0 ? '/' : `/${s.slug}`), regelwerkUrl: '/r.css' });
   assert.ok(seite2.includes('<title>Unsere Karte · Café</title>'));
   assert.ok(seite2.includes('<a href="/karte" aria-current="page">Karte &amp; Preise</a>'));
-  assert.ok(renderWebsite(website, website.seiten[0], { projektName: 'Café', bildUrl: (id) => id, seitenUrl: () => '/' }).includes('<title>Café</title>'));
+  assert.ok(seite2.includes('<link rel="stylesheet" href="/r.css">'));
+  assert.ok(renderWebsite(website, website.seiten[0], { projektName: 'Café', bildUrl: (id) => id, seitenUrl: () => '/', regelwerkUrl: '/r.css' }).includes('<title>Café</title>'));
 });

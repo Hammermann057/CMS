@@ -331,3 +331,61 @@ test('Lokal: Einrichten im Browser und Anmelden per Klick, aber nur auf diesem R
   // Ohne lokalen Modus gibt es den Weg gar nicht.
   assert.equal((await sende('/lokal/anmelden', { person: '00000000-0000-0000-0000-000000000000' })).status, 404);
 });
+
+test('Regelwerk: ändern, Vorschlag übernehmen, Tokens ein und aus, online erst nach Freigabe', async () => {
+  const leitung = await alsLea();
+  const projektPfad = (await sende('/projekte', { name: 'Rösterei Nord' }, leitung)).headers.get('location') ?? '';
+  const projektId = projektPfad.split('/').pop() ?? '';
+  await sende(`${projektPfad}/seiten`, { titel: 'Start' }, leitung);
+
+  let seite = await (await hole(`${projektPfad}/regelwerk`, leitung)).text();
+  assert.ok(seite.includes('Kontraste und Größen passen.'));
+  assert.ok((await (await hole(projektPfad, leitung)).text()).includes('Regelwerk bearbeiten'));
+
+  // Ein blasser Akzent: Hinweis mit Vorschlag erscheint.
+  assert.equal((await sende(`${projektPfad}/regelwerk`, { akzent: '#fde68a', akzentText: '#1a1a1a' }, leitung)).status, 303);
+  assert.equal((await sende(`${projektPfad}/regelwerk`, { akzent: 'gelb' }, leitung)).status, 400);
+  seite = await (await hole(`${projektPfad}/regelwerk`, leitung)).text();
+  assert.ok(seite.includes('Knopf vor Hintergrund'));
+  const vorschlag = /name="feld" value="akzent"><input type="hidden" name="wert" value="(#[0-9a-f]{6})"/.exec(seite)?.[1] ?? '';
+  assert.ok(vorschlag, 'Der Vorschlag lässt sich übernehmen');
+  assert.equal((await sende(`${projektPfad}/regelwerk/vorschlag`, { feld: 'akzent', wert: vorschlag }, leitung)).status, 303);
+  assert.ok(!(await (await hole(`${projektPfad}/regelwerk`, leitung)).text()).includes('Knopf vor Hintergrund'));
+  assert.ok((await (await hole(`${projektPfad}/regelwerk.css`, leitung)).text()).includes(`--r-akzent:${vorschlag};`));
+
+  // Tokens ausgeben und einlesen
+  const datei = await hole(`${projektPfad}/regelwerk.tokens.json`, leitung);
+  assert.match(datei.headers.get('content-disposition') ?? '', /attachment; filename="regelwerk-roesterei-nord\.tokens\.json"/);
+  assert.equal((await datei.json()).farbe.akzent.$value.hex, vorschlag);
+  const eingelesen = await sende(`${projektPfad}/regelwerk/tokens`, { json: JSON.stringify({ farbe: { text: { $value: '#0b0b0b' } }, x: { $value: 1 } }) }, leitung);
+  const meldung = await eingelesen.text();
+  assert.ok(meldung.includes('Übernommen: Text.') && meldung.includes('x: kein passendes Feld im Regelwerk'));
+  assert.equal((await sende(`${projektPfad}/regelwerk/tokens`, { json: '{kaputt' }, leitung)).status, 400);
+
+  // Prüf-Link und Veröffentlichung
+  await sende(`${projektPfad}/einreichen`, {}, leitung);
+  const pruefPfad = new RegExp(`value="${BASIS_URL}(/pruefen/[A-Za-z0-9_-]+)"`).exec(await (await hole(projektPfad, leitung)).text())?.[1] ?? '';
+  const pruefCss = await (await hole(`${pruefPfad}/regelwerk.css`)).text();
+  assert.ok(pruefCss.includes(`.vorschau[data-regelwerk="neu"]{`) && pruefCss.includes(`--r-akzent:${vorschlag};`));
+  assert.equal((await hole('/seiten/roesterei-nord/_regelwerk.css')).status, 404);
+  await sende(pruefPfad, { entscheidung: 'freigeben', name: 'Kunde' });
+  assert.ok((await (await hole('/seiten/roesterei-nord')).text()).includes('href="/seiten/roesterei-nord/_regelwerk.css"'));
+  assert.ok((await (await hole('/seiten/roesterei-nord/_regelwerk.css')).text()).startsWith('.oeffentlich{'));
+
+  // Neue Farbe: online bleibt die alte, der Prüf-Link zeigt den Unterschied.
+  await sende(`${projektPfad}/regelwerk`, { akzent: '#0f766e' }, leitung);
+  assert.ok((await (await hole('/seiten/roesterei-nord/_regelwerk.css')).text()).includes(`--r-akzent:${vorschlag};`));
+  await sende(`${projektPfad}/einreichen`, {}, leitung);
+  const zweiter = new RegExp(`value="${BASIS_URL}(/pruefen/[A-Za-z0-9_-]+)"`).exec(await (await hole(projektPfad, leitung)).text())?.[1] ?? '';
+  const zweiterText = await (await hole(zweiter)).text();
+  assert.ok(zweiterText.includes('Gestaltung geändert'));
+  assert.ok(zweiterText.includes(`<tr><th scope="row">Akzent</th><td>${vorschlag}</td><td>#0f766e</td></tr>`));
+
+  // Kund:innen sehen das Regelwerk, ändern es aber nicht.
+  await sende('/team', { name: 'Herr Nord', email: 'nord@kundin.test', rolle: 'kundin', projektId }, leitung);
+  const kunde = await anmelden('nord@kundin.test');
+  const ansicht = await (await hole(`${projektPfad}/regelwerk`, kunde)).text();
+  assert.ok(ansicht.includes('<fieldset disabled>') && ansicht.includes('Das Regelwerk legt die Agentur fest.'));
+  assert.equal((await sende(`${projektPfad}/regelwerk`, { akzent: '#ff0000' }, kunde)).status, 403);
+  assert.equal((await sende(`${projektPfad}/regelwerk/vorschlag`, { feld: 'akzent', wert: '#ff0000' }, kunde)).status, 403);
+});

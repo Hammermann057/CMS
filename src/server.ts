@@ -5,7 +5,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Fehler, Kern, LINK_GUELTIG_MINUTEN, MAX_GROESSE, NichtGefunden, SITZUNG_GUELTIG_TAGE } from './kern/kern.ts';
 import { darf, Verboten } from './kern/rechte.ts';
-import { esc, renderWebsite } from './renderer/seite.ts';
+import { esc, regelwerkCss, renderWebsite } from './renderer/seite.ts';
+import { seiteRegelwerk, teilRegelwerk } from './oberflaeche/regelwerk.ts';
+import { alsTokens, ausTokens, STANDARD_REGELWERK } from './kern/regelwerk.ts';
 import { ausFormular, seiteEditor, seitePruefen, teilSeiten, wendeAktionAn } from './oberflaeche/editor.ts';
 import { groesse, ROLLEN_NAME, zeit } from './oberflaeche/format.ts';
 import { Protokollpost, smtpAusUmgebung } from './post.ts';
@@ -103,6 +105,11 @@ function sendeHtml(res: ServerResponse, status: number, html: string): void {
   res.end(html);
 }
 
+function sendeCss(res: ServerResponse, css: string): void {
+  res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-cache' });
+  res.end(css);
+}
+
 function sendeJson(res: ServerResponse, status: number, daten: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'X-Content-Type-Options': 'nosniff' });
   res.end(JSON.stringify(daten));
@@ -128,7 +135,7 @@ function sendeMedium(res: ServerResponse, datei: { medium: Medium; daten: Buffer
 
 // --- Seiten -------------------------------------------------------------------
 
-function rahmen(titel: string, inhalt: string, person?: Person, breit = false): string {
+function rahmen(titel: string, inhalt: string, person?: Person, breit = false, stile: string[] = []): string {
   const navigation = person
     ? `<nav class="navigation" aria-label="Hauptnavigation">
 <a href="/">Projekte</a>${darf(person, 'team.ansehen') ? '<a href="/team">Team</a>' : ''}
@@ -144,6 +151,7 @@ function rahmen(titel: string, inhalt: string, person?: Person, breit = false): 
 <title>${esc(titel)} · Agenturtool</title>
 <link rel="stylesheet" href="/stil.css">
 <link rel="stylesheet" href="/seite.css">
+${stile.map((href) => `<link rel="stylesheet" href="${esc(href)}">`).join('\n')}
 <script src="/app.js" defer></script>
 </head>
 <body>
@@ -240,6 +248,7 @@ function seiteProjekt(kern: Kern, person: Person, projektId: string, basisUrl: s
 <h1>${esc(projekt.name)}</h1>
 ${projekt.kunde ? `<p class="unterzeile">${esc(projekt.kunde)}</p>` : ''}
 ${teilSeiten(person, projekt, kern.seiten(person, projekt.id))}
+${teilRegelwerk(person, projekt, kern.regelwerk(person, projekt.id))}
 ${teilMedien(person, projekt.id, kern.medien(person, projekt.id))}
 ${teilFreigabe(kern.letzterStand(person, projekt.id), projekt.id, projekt.slug, basisUrl, darf(person, 'stand.einreichen', projekt))}
 ${teilVerlauf(kern.verlauf(person, projekt.id))}`;
@@ -353,6 +362,13 @@ const R = {
   website: new RegExp(`^/seiten/(${SLUG})$`),
   websiteSeite: new RegExp(`^/seiten/(${SLUG})/(${SLUG})$`),
   websiteBild: new RegExp(`^/seiten/(${SLUG})/_bilder/(${UUID})$`),
+  websiteRegelwerk: new RegExp(`^/seiten/(${SLUG})/_regelwerk\\.css$`),
+  pruefenRegelwerk: new RegExp(`^/pruefen/(${TOKEN})/regelwerk\\.css$`),
+  regelwerk: new RegExp(`^/projekte/(${UUID})/regelwerk$`),
+  regelwerkCss: new RegExp(`^/projekte/(${UUID})/regelwerk\\.css$`),
+  regelwerkTokens: new RegExp(`^/projekte/(${UUID})/regelwerk\\.tokens\\.json$`),
+  regelwerkVorschlag: new RegExp(`^/projekte/(${UUID})/regelwerk/vorschlag$`),
+  regelwerkEinlesen: new RegExp(`^/projekte/(${UUID})/regelwerk/tokens$`),
   pruefen: new RegExp(`^/pruefen/(${TOKEN})$`),
   pruefenBild: new RegExp(`^/pruefen/(${TOKEN})/bilder/(${UUID})$`),
   anmeldeLink: new RegExp(`^/anmelden/(${TOKEN})$`),
@@ -381,6 +397,7 @@ function sendeWebsite(kern: Kern, res: ServerResponse, projektSlug: string, seit
       projektName: online.projekt.name,
       bildUrl: (id) => `/seiten/${projektSlug}/_bilder/${id}`,
       seitenUrl: (s, i) => (i === 0 ? `/seiten/${projektSlug}` : `/seiten/${projektSlug}/${s.slug}`),
+      regelwerkUrl: `/seiten/${projektSlug}/_regelwerk.css`,
     }),
   );
 }
@@ -403,6 +420,19 @@ async function bearbeite(kern: Kern, e: Einstellungen, req: IncomingMessage, res
   // Öffentlich: veröffentlichte Website und Prüf-Link.
   if (liest && (m = R.website.exec(pfad))) return sendeWebsite(kern, res, m[1], null);
   if (liest && (m = R.websiteBild.exec(pfad))) return sendeMedium(res, kern.bildVeroeffentlicht(m[1], m[2]));
+  if (liest && (m = R.websiteRegelwerk.exec(pfad))) {
+    const online = kern.veroeffentlicht(m[1]);
+    if (!online) throw new NichtGefunden('Diese Seite ist nicht veröffentlicht.');
+    return sendeCss(res, regelwerkCss(online.website.regelwerk ?? STANDARD_REGELWERK, '.oeffentlich'));
+  }
+  if (liest && (m = R.pruefenRegelwerk.exec(pfad))) {
+    const { stand, veroeffentlicht } = kern.standPerToken(m[1]);
+    return sendeCss(
+      res,
+      regelwerkCss(stand.inhalt.regelwerk ?? STANDARD_REGELWERK, '.vorschau[data-regelwerk="neu"]') +
+        regelwerkCss(veroeffentlicht?.regelwerk ?? STANDARD_REGELWERK, '.vorschau[data-regelwerk="online"]'),
+    );
+  }
   if (liest && (m = R.websiteSeite.exec(pfad))) return sendeWebsite(kern, res, m[1], m[2]);
   if (liest && (m = R.pruefenBild.exec(pfad))) return sendeMedium(res, kern.bildZumStand(m[1], m[2]));
   if ((m = R.pruefen.exec(pfad))) {
@@ -415,7 +445,7 @@ async function bearbeite(kern: Kern, e: Einstellungen, req: IncomingMessage, res
       });
       return umleiten(res, pfad);
     }
-    return sendeHtml(res, 200, rahmen('Stand prüfen', seitePruefen(kern.standPerToken(m[1]), m[1]), undefined, true));
+    return sendeHtml(res, 200, rahmen('Stand prüfen', seitePruefen(kern.standPerToken(m[1]), m[1]), undefined, true, [`/pruefen/${m[1]}/regelwerk.css`]));
   }
 
   // Anmeldung per Mail-Link.
@@ -568,7 +598,11 @@ Ein Passwort brauchst du nicht. Du bekommst jedes Mal einen Link per Mail.`,
     if (seite.projektId !== projektId) throw new NichtGefunden('Seite nicht gefunden.');
     if (liest) {
       const projekt = kern.projekt(person, projektId);
-      return sendeHtml(res, 200, rahmen(seite.titel, seiteEditor(person, projekt, seite, kern.medien(person, projektId), e.basisUrl), person, true));
+      return sendeHtml(
+        res,
+        200,
+        rahmen(seite.titel, seiteEditor(person, projekt, seite, kern.medien(person, projektId), e.basisUrl), person, true, [`/projekte/${projektId}/regelwerk.css`]),
+      );
     }
     if (req.method === 'POST') {
       const felder = await formular(req);
@@ -577,6 +611,45 @@ Ein Passwort brauchst du nicht. Du bekommst jedes Mal einen Link per Mail.`,
       kern.seiteSpeichern(person, seiteId, { titel: eingabe.titel, bausteine });
       return umleiten(res, `/projekte/${projektId}/seiten/${seiteId}${ziel ? `#b-${ziel}` : ''}`);
     }
+  }
+
+  // Regelwerk
+  if ((m = R.regelwerk.exec(pfad))) {
+    const projekt = kern.projekt(person, m[1]);
+    if (req.method === 'POST') {
+      kern.regelwerkSpeichern(person, projekt.id, Object.fromEntries(await formular(req)));
+      return umleiten(res, `/projekte/${projekt.id}/regelwerk`);
+    }
+    const stile = [`/projekte/${projekt.id}/regelwerk.css`];
+    return sendeHtml(res, 200, rahmen('Regelwerk', seiteRegelwerk(person, projekt, kern.regelwerk(person, projekt.id)), person, true, stile));
+  }
+  if (liest && (m = R.regelwerkCss.exec(pfad))) return sendeCss(res, regelwerkCss(kern.regelwerk(person, m[1]), '.vorschau'));
+  if (liest && (m = R.regelwerkTokens.exec(pfad))) {
+    const projekt = kern.projekt(person, m[1]);
+    res.writeHead(200, {
+      'Content-Type': 'application/design-tokens+json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="regelwerk-${projekt.slug}.tokens.json"`,
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.end(JSON.stringify(alsTokens(kern.regelwerk(person, projekt.id), projekt.name), null, 2));
+    return;
+  }
+  if (req.method === 'POST' && (m = R.regelwerkVorschlag.exec(pfad))) {
+    const felder = await formular(req);
+    kern.regelwerkSpeichern(person, m[1], { [felder.get('feld') ?? '']: felder.get('wert') ?? '' });
+    return umleiten(res, `/projekte/${m[1]}/regelwerk`);
+  }
+  if (req.method === 'POST' && (m = R.regelwerkEinlesen.exec(pfad))) {
+    const projekt = kern.projekt(person, m[1]);
+    let json: unknown;
+    try {
+      json = JSON.parse((await formular(req)).get('json') ?? '');
+    } catch {
+      throw new Fehler('Das ist kein gültiges JSON. Am besten die ganze Datei einfügen.');
+    }
+    const ergebnis = ausTokens(json, kern.regelwerk(person, projekt.id));
+    const neu = kern.regelwerkSpeichern(person, projekt.id, ergebnis.regelwerk);
+    return sendeHtml(res, 200, rahmen('Regelwerk', seiteRegelwerk(person, projekt, neu, ergebnis), person, true, [`/projekte/${projekt.id}/regelwerk.css`]));
   }
 
   if (req.method === 'POST' && (m = R.seiteVerschieben.exec(pfad))) {

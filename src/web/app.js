@@ -77,3 +77,67 @@ if (editor) {
     });
   }
 }
+
+// Regelwerk: Änderungen sofort in der Vorschau zeigen und den Kontrast neu rechnen.
+const regelForm = document.querySelector('[data-regelwerk-form]');
+const regelVorschau = document.querySelector('[data-regelwerk-vorschau]');
+if (regelForm && regelVorschau) {
+  const istFarbe = (wert) => /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.test(wert);
+  const normFarbe = (wert) => {
+    const h = wert.replace('#', '').toLowerCase();
+    return `#${h.length === 3 ? [...h].map((z) => z + z).join('') : h}`;
+  };
+  const leuchtdichte = (hex) => {
+    const [r, g, b] = [1, 3, 5].map((i) => {
+      const s = parseInt(hex.slice(i, i + 2), 16) / 255;
+      return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const kontrast = (a, b) => {
+    const [hell, dunkel] = [leuchtdichte(a), leuchtdichte(b)].sort((x, y) => y - x);
+    return (hell + 0.05) / (dunkel + 0.05);
+  };
+  const farbeVon = (name) => {
+    const feld = regelForm.elements[name];
+    return feld && istFarbe(feld.value) ? normFarbe(feld.value) : null;
+  };
+  const kontrasteNeu = () => {
+    for (const zeile of document.querySelectorAll('[data-kontrast]')) {
+      const [feld, gegen, ziel] = zeile.dataset.kontrast.split(':');
+      const a = farbeVon(feld);
+      const b = farbeVon(gegen);
+      if (!a || !b) continue;
+      const wert = kontrast(a, b);
+      zeile.querySelector('span').textContent = `${(Math.floor(wert * 10) / 10).toFixed(1).replace('.', ',')} : 1`;
+      zeile.className = wert >= Number(ziel) ? 'reicht' : 'reicht-nicht';
+    }
+  };
+  const zeige = (feld) => {
+    const variable = feld.dataset.variable;
+    if (!variable) return;
+    let wert = feld.value;
+    if (feld.dataset.art === 'farbe') {
+      if (!istFarbe(wert)) return;
+      wert = normFarbe(wert);
+    }
+    if (feld.tagName === 'SELECT') wert = feld.selectedOptions[0]?.dataset.stapel ?? wert;
+    if (feld.dataset.einheit) wert += feld.dataset.einheit;
+    regelVorschau.style.setProperty(variable, wert);
+  };
+  regelForm.addEventListener('input', (ereignis) => {
+    const feld = ereignis.target;
+    if (feld.dataset.farbeFuer) {
+      const text = regelForm.elements[feld.dataset.farbeFuer];
+      text.value = feld.value;
+      zeige(text);
+    } else {
+      if (feld.dataset.art === 'farbe' && istFarbe(feld.value)) {
+        const waehler = regelForm.querySelector(`[data-farbe-fuer="${feld.name}"]`);
+        if (waehler) waehler.value = normFarbe(feld.value);
+      }
+      zeige(feld);
+    }
+    kontrasteNeu();
+  });
+}

@@ -3,7 +3,7 @@
 CMS und Arbeitsraum für Agenturen. Material kommt in ein Projekt, wird dort zur Seite
 und geht erst nach einer Freigabe per Prüf-Link online.
 
-Stand: **Etappe 1** mit Anmeldung per Mail-Link und dem ersten Teil von **Etappe 3**: Seiten aus Bausteinen.
+Stand: **Etappe 1** mit Anmeldung per Mail-Link und **Etappe 3**: Seiten aus Bausteinen und das Regelwerk.
 
 ## Was schon geht
 
@@ -24,13 +24,20 @@ Stand: **Etappe 1** mit Anmeldung per Mail-Link und dem ersten Teil von **Etappe
   nicht gesperrt hat. Titel, Reihenfolge und Aufbau bleiben bei der Agentur, auch wenn jemand am Formular vorbei schickt.
 - Stand einreichen: Alle Seiten werden eingefroren. Der Prüf-Link zeigt Seite für Seite, was neu ist,
   was sich geändert hat und was entfällt; ohne Konto freigeben oder Änderung wünschen
+- **Regelwerk je Projekt:** Farben, Schriften, Textgrößen, Ecken, Abstände, Breite. Die Vorschau zeigt Änderungen
+  schon beim Tippen. Kontraste werden nach WCAG 2.2 geprüft; reicht einer nicht, schlägt das Werkzeug die nächstgelegene
+  Farbe im selben Farbton vor, die genügt, und übernimmt sie auf Klick. Nur Schriften, die auf den Geräten schon liegen,
+  damit keine Adressen an Schriftanbieter gehen.
+- **Design-Tokens:** Das Regelwerk lässt sich im Format der W3C Design Tokens Community Group (2025.10) ausgeben
+  und einlesen. Was beim Einlesen nicht passt, wird mit Grund genannt.
+- Auch das Regelwerk geht erst mit der Freigabe online; der Prüf-Link zeigt, was sich an der Gestaltung ändert.
 - Die freigegebene Website wird unter `/seiten/<projekt>` mit Navigation ausgeliefert.
   Bilder dort sind nur erreichbar, wenn sie auf der Website vorkommen.
 - Verlauf: wer hat was hochgeladen, geändert, eingereicht, freigegeben
 
 ## Was bewusst noch fehlt
 
-- Noch kein Regelwerk mit Tokens: Farben, Schriften und Abstände der Website sind ein Platzhalter (Etappe 3, zweiter Teil)
+- Eigene Schriftdateien hochladen und Regeln zu Marke und Tonalität kommen später
 - Text ohne Formatierung wie fett oder Links im Fließtext
 - Kein Eingang über Google Drive, Mail oder Handy (Etappe 2)
 - Keine Kommentare am Element, keine Zeitvorschläge (Etappe 4)
@@ -86,10 +93,12 @@ npm test
 | --- | --- |
 | `src/kern/` | Projekte, Personen, Anmeldung, Rechte, Medien, Stände, Verlauf. Kennt kein HTTP. |
 | `src/kern/bausteine.ts` | Bausteine anlegen, prüfen, vergleichen. |
-| `src/kern/pruefer.ts` | Hinweise mit Folge, Grund und Ausweg. Wird zum Regelwerk. |
+| `src/kern/regelwerk.ts` | Regelwerk: Felder, Prüfung, Design-Tokens ein und aus. |
+| `src/kern/farbe.ts` | Kontrast nach WCAG und Farbvorschläge. |
+| `src/kern/pruefer.ts` | Hinweise mit Folge, Grund und Ausweg, für Bausteine und Regelwerk. |
 | `src/renderer/` | Macht aus dem Inhalt HTML, für Vorschau, Prüf-Link und Website gleich. |
 | `src/server.ts` | Verteiler, Anmeldung, Projekte, Team und die ausgelieferten Seiten. |
-| `src/oberflaeche/` | Editor, Seitenliste und Prüf-Link. |
+| `src/oberflaeche/` | Editor, Seitenliste, Regelwerk und Prüf-Link. |
 | `src/post.ts` | Mailversand über SMTP, selbst geschrieben. |
 | `src/einrichten.ts` | Erste Einrichtung über die Kommandozeile. |
 | `src/web/` | Stylesheets und das Skript für die Ablage. |
